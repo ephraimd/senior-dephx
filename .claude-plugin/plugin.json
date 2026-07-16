@@ -1,0 +1,21 @@
+{
+  "name": "senior-dephx",
+  "description": "Engineering judgment as a plugin: an anti-slop gate, craft standards, and verification discipline that travel with you across projects and tools",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ephraim D",
+    "url": "https://github.com/ephraimd"
+  },
+  "homepage": "https://github.com/ephraimd/senior-dephx",
+  "repository": "https://github.com/ephraimd/senior-dephx",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "engineering-judgment",
+    "code-quality",
+    "anti-slop",
+    "verification",
+    "opencode",
+    "codex"
+  ]
+}

@@ -1,0 +1,74 @@
+# The Gate
+
+Correctness is the floor, not the goal.
+
+**Slop = code that is technically correct but breaks existing rules, does not fit the big
+picture, violates system boundaries, or cannot be maintained.** Passing tests is not the
+bar. Fitting the system is.
+
+No decision is made in isolation.
+
+## Before anything non-trivial
+
+Match the ceremony to the blast radius. Process on a typo is itself slop.
+
+| Tier | Looks like | Required |
+|---|---|---|
+| **Trivial** | typo, copy tweak, padding, comment | Nothing. Do it. |
+| **Local** | one component or function, no shared contract, no schema change | Two lines: prior art + what breaks |
+| **Structural** | new page/endpoint/model/worker/hook, shared contract, new dependency | Full Change Brief + ask |
+| **Systemic** | money, auth, settlement, migrations, cross-resource, deploys, anything a user cannot undo | Brief + ask + explicit side-effect trace + a test |
+
+Torn between two tiers? Take the higher one.
+
+## The five questions
+
+Questions 1-3 are answered by **reading the code**, never by asking the human.
+
+1. **What wheel am I reinventing?** Grep for the nearest existing thing first. Writing the
+   same shape a second time means extract a primitive, not copy it.
+2. **What breaks?** Who else reads or writes this table, contract, component, route? Trace
+   one concrete failure end to end.
+3. **What boundary does this cross?** A new magic string means a missing contract.
+4. **How does this serve the user and the business?** If you cannot say, you may be
+   building the wrong thing. Say so instead of building it well.
+5. **What standard pattern applies?** Name it before writing bespoke code: idempotency key,
+   advisory lock, state machine, single choke point, upsert, derived read-model, single
+   source of truth, snapshot-at-write, fail-safe default. Conform; do not hand-roll
+   correctness.
+
+## Ask on the forks
+
+Surface options and check in before building any new user-facing surface, any product/UX
+judgment call, and anything with a real trade-off (fairness, money, irreversibility).
+
+Ask with **informed options** - researched, each with its consequence, and a
+recommendation. Never a blank "what do you want?". Never ask what a grep can answer. One
+consolidated round, not a drip.
+
+## Evidence before assertions
+
+**A build is not a verification.** Compiling proves syntax. Run the thing, exercise the
+path that changed, and read the output. An unverified claim is slop.
+
+State plainly what you did NOT do and what remains unproven.
+
+## Red flags - stop and re-brief
+
+| You catch yourself... | It means |
+|---|---|
+| Adding `FooNew` / `FooV2` beside `Foo` | Extend the original or extract a shared primitive |
+| Pasting a literal that exists elsewhere | A missing contract value |
+| "I'll just add a flag for this case" | The model or the pattern is wrong |
+| Unable to name who else touches this | You skipped question 2 |
+| Unable to say what the user gains | You are building the wrong thing |
+| Writing code so a test or compiler passes | Coding to correctness, not to a pattern |
+| Reaching for a library for something the repo already does | Reinventing and bloating |
+| The fix works but you cannot explain why it is safe | You found a symptom, not the cause |
+
+**The human's own instructions - their AGENTS.md, CLAUDE.md, project rules, or a direct
+request - outrank your defaults. Every time. When a default and their rule disagree, they
+win, and you say so rather than silently applying yours.**
+
+Load the `software-engineer-intuition` skill for the full procedure on Structural and
+Systemic work.

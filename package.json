@@ -1,0 +1,12 @@
+{
+  "name": "senior-dephx",
+  "version": "0.1.0",
+  "description": "Engineering judgment as a plugin: an anti-slop gate, craft standards, and verification discipline that travel across projects and tools",
+  "type": "module",
+  "main": ".opencode/plugins/senior-dephx.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimd/senior-dephx.git"
+  }
+}
