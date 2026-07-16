@@ -1,6 +1,6 @@
 {
   "name": "senior-dephx",
-  "description": "Engineering judgment as a plugin: an anti-slop gate, craft standards, and verification discipline that travel with you across projects and tools",
+  "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, ask on the real decisions, and verify before claiming done",
   "version": "0.1.0",
   "author": {
     "name": "Ephraim D",
@@ -11,11 +11,14 @@
   "license": "MIT",
   "keywords": [
     "skills",
-    "engineering-judgment",
     "code-quality",
+    "engineering-judgment",
     "anti-slop",
+    "code-review",
     "verification",
+    "best-practices",
     "opencode",
-    "codex"
+    "codex",
+    "agent-skills"
   ]
 }

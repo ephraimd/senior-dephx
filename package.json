@@ -1,12 +1,19 @@
 {
   "name": "senior-dephx",
   "version": "0.1.0",
-  "description": "Engineering judgment as a plugin: an anti-slop gate, craft standards, and verification discipline that travel across projects and tools",
+  "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, ask on the real decisions, and verify before claiming done",
   "type": "module",
   "main": ".opencode/plugins/senior-dephx.js",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ephraimd/senior-dephx.git"
-  }
+  },
+  "keywords": [
+    "opencode-plugin",
+    "claude-code-plugin",
+    "agent-skills",
+    "code-quality",
+    "engineering-judgment"
+  ]
 }

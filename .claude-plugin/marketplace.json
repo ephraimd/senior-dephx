@@ -8,7 +8,7 @@
     {
       "name": "senior-dephx",
       "source": "./",
-      "description": "Engineering judgment as a plugin: an anti-slop gate, craft standards, and verification discipline that travel across projects and tools"
+      "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, ask on the real decisions, and verify before claiming done"
     }
   ]
 }
