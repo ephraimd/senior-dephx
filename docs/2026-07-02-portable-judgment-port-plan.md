@@ -122,25 +122,28 @@ git commit -m "test: smoke — manifests, frontmatter, hook"
 
 - [ ] **Step 1: Append the check** (before the final summary block)
 
-```bash
-echo "== nouns: the core names no framework/vendor (the design rule, executable) =="
-# Word-boundaried on purpose: an un-anchored grep flags "plugin" and "engineering" for "gin",
-# and a noisy check gets ignored — an ignored check is worse than none.
-FRAMEWORK_NOUNS='go|golang|java|jvm|spring|gradle|maven|node|nestjs|express|django|rails|flask|laravel|react|vue|gin|echo|fiber|gorm|hibernate|postgres|mysql|mongodb|redis|kafka|rabbitmq|nats'
-PROJECT_NOUNS='revhero|dokploy|hubspot|pipedrive|safedbquery|respondok'
-for d in "$ROOT"/core "$ROOT"/skills/*/; do
-  n="$(basename "$d")"
-  case "$n" in *-backend-blueprint) continue ;; esac   # blueprints may name their language/libs
-  if hits="$(grep -rniE "\b($FRAMEWORK_NOUNS)\b" "$d" 2>/dev/null)"; then
-    fail "$n names a framework/vendor:"; printf '%s\n' "$hits" | head -3 | sed 's/^/       /'
-  else pass "$n is noun-free"; fi
-done
+**SHIPPED — see `test/smoke.sh` for the authoritative version.** Do not paste a copy here;
+two copies of a check drift, which is the failure this repo exists to end.
 
-echo "== nouns: NOTHING may name a company/product/repo/host — blueprints included =="
-if hits="$(grep -rniE "\b($PROJECT_NOUNS)\b" "$ROOT"/core "$ROOT"/skills 2>/dev/null)"; then
-  fail "project noun leaked:"; printf '%s\n' "$hits" | head -3 | sed 's/^/       /'
-else pass "no project nouns anywhere"; fi
-```
+**The first draft of this step was wrong, and the lesson is load-bearing.** It used a single
+case-insensitive denylist containing `go|java|spring|node|react|rails|express|echo|fiber|maven`.
+**Those are English words.** Word boundaries fix *substring* collisions (`gin` inside
+"plugin"); they do nothing for `go` the verb versus `Go` the language. Pasted verbatim it
+failed instantly on this repo's own prose — *"**Go** and find out"*, *"cards **go** 1-col"*.
+
+**What shipped instead — two tiers:**
+- **Tier 1** — nouns with no English meaning (`golang|jvm|django|gorm|postgres|kafka|…`):
+  matched case-insensitively. Unambiguous.
+- **Tier 2** — nouns that are also English words: matched only as a **capitalised proper noun
+  in a technology context** — mid-sentence after a lowercase word (`use Spring`, `in Go`), or
+  before a tech qualifier (`Go service`). Also matched inside markdown code spans, since a
+  backticked `` `Spring` `` is the most likely way a doctrine file names a framework.
+
+**Known, accepted limitation (documented in-file):** a **sentence-initial** mention with an
+arbitrary verb — `Spring handles that.` — is **not caught**, and cannot be by grep: closing it
+needs `^`-anchoring, which flags this repo's own imperative voice, and the set of verbs
+following a proper noun is unbounded. A third branch would make the check *look* complete.
+**Grep loses that case; review must catch it.** Say so rather than implying full coverage.
 
 - [ ] **Step 2: Run — expect PASS on the current core**
 

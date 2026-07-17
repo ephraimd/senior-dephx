@@ -24,7 +24,15 @@ invocation.
 - Give the author's **opinionated house style** a home that travels, **without it ever
   applying unasked**.
 - Fix one **live contradiction** in the existing doctrine.
-- Make the **design rule executable** rather than aspirational.
+- Make the **design rule executable** rather than aspirational — **partially**, and honestly
+  so. A grep catches unambiguous nouns (`golang`, `jvm`, `gorm`) and English-word nouns
+  (`Go`, `Spring`) in a *technology context* (*"use Spring"*, *"Go service"*, or inside a
+  code span). It **cannot** catch a sentence-initial mention with an arbitrary verb
+  (*"Spring handles that."*) — that needs `^`-anchoring, which flags this repo's own
+  imperative voice (*"Go and find out"*), and the set of verbs after a proper noun is
+  unbounded. **Grep loses that case; review must catch it.** A branch that closed it on paper
+  would make the check *look* complete — the exact false confidence this plugin exists to
+  prevent. State the gap; never imply coverage you don't have.
 
 **Non-goals**
 - Porting **facts** (§3).
