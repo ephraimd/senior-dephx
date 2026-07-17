@@ -51,6 +51,12 @@ own boundary (a package, a client module), never inlined into business logic.
 
 - One place to change when the vendor changes. One place to read to know what we send them.
 - Never let a vendor's shape leak into your domain model.
+- **Determine replace-vs-merge before any external save.** An "update" endpoint that
+  *replaces* silently deletes everything you did not send. Read the current state, modify
+  it, write it back whole - and read first. Assuming merge is the default failure here.
+- **Enumerate what a provider does not emit.** Event coverage is never complete. Every
+  mutation the provider does not tell you about needs a poll to find it. Push plus
+  reconcile; push alone loses data quietly.
 
 ## 4. Validate at the edge, decide in the middle
 
@@ -62,6 +68,9 @@ own boundary (a package, a client module), never inlined into business logic.
   moment someone rewords a string - and nothing tells you.
 - Fail loudly at boundaries you cannot recover. A swallowed error that returns an empty
   list is how an entire feature quietly disappears from production.
+- **A business "no" is a success.** Three outcomes exist: success, retryable failure, and
+  poison. "The card was declined" is a *result* - record it and acknowledge the message.
+  Retrying a business failure until it succeeds is a loop that never ends.
 
 ## 5. Money, state, and anything irreversible
 
@@ -102,3 +111,6 @@ own boundary (a package, a client module), never inlined into business logic.
 | A second implementation of an existing rule | It will drift, and drift costs money |
 | A comment explaining what, not why | Delete it |
 | A setting read live where it should have been snapshotted | The terms can change after the fact |
+| An update that sends only the fields you changed | A replace endpoint deletes the rest |
+| A provider's events trusted to cover every change | The gaps surface only as missing data |
+| A business rejection queued for retry | A result retried as though it were a fault |

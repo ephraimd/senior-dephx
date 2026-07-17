@@ -44,6 +44,13 @@ Scale to the blast radius. Trivial edits need none of this.
 7. **Clean up everything you started.** Kill the processes, remove the temp files and
    scratch scripts, close the browser. Never leave them for the human, and never commit
    them.
+8. **Do not trust a control plane's own success field.** "Accepted" is not "live". Read the
+   resulting artifact back - its identity (digest, tag, version) and its timestamp - and
+   confirm it is the thing you just shipped. An API that accepts a field and ignores it
+   still returns 200.
+9. **A green build with a failed deploy is configuration, not code.** Changing code first
+   destroys the evidence and adds a variable to a system that already has too many. Read
+   the config, the env, and the wiring before you touch a line.
 
 ## Migrations, backfills, and workers
 
@@ -77,3 +84,5 @@ These deserve their own pass because their failure mode is silence.
 | Reporting a screenshot you didn't open | Open it and describe what is in it |
 | Leaving a server on port X running | Kill it |
 | Explaining why an unverified thing is probably fine | That paragraph is the tell. Verify it. |
+| "The deploy came back accepted" | Read the artifact back; check its identity and timestamp |
+| Changing code because a deploy failed | Read the config, the env, and the wiring first |
