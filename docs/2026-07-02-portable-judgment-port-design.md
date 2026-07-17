@@ -7,361 +7,216 @@
 
 ## 1. Context
 
-The doctrine in this plugin was written from scratch. In parallel, a production
-Go/Java microservice codebase accumulated ~10 project-level skills containing the same
-author's engineering judgment, expressed in that project's nouns.
+The doctrine here was written from scratch. In parallel, a production Go/JVM backend
+accumulated ~10 project-level skills carrying the same author's judgment in that project's
+nouns. An audit extracted **74 portable kernels** — ~29 already covered here, ~54 "new."
 
-An audit extracted **74 portable kernels** from those skills. **~29 (≈40%) are already
-covered** by this plugin's gate + five skills — a good sign for both artifacts. **~54 are
-genuinely new**, and they cluster into two themes:
-
-- **integration / event semantics** — queues, webhooks, sync, retries
-- **external control planes** — vendor APIs, credentials, deploy targets
-
-**Neither cluster is covered by this plugin, nor by the `superpowers` plugin.** That is the
-real gap this change closes.
+**Porting all 54 was wrong, and the first draft of this spec was wrong to propose it.**
+Applying the correct filter (§3) collapses 54 to about five. This document is the reduced
+scope.
 
 ## 2. Goals / non-goals
 
 **Goals**
-- Absorb the genuinely-new portable judgment without diluting adherence.
-- Keep the core **universal** — the design rule (*"name no framework, no component, no
-  colour"*) survives verbatim.
-- Make the plugin **additionally valuable to anyone working in Go or lightweight-JVM
-  backends**, extensibly (more languages later, with zero core churn).
-- Preserve the existing authority ladder: **human > project (facts) > plugin (procedure)**.
+- Ship the **preferences** — the only thing a model cannot supply for itself.
+- Ship the handful of rules where a model's **default is actively wrong**, not merely
+  unthought.
+- Fix one **live contradiction** in the existing doctrine.
+- Make the **design rule executable** rather than aspirational.
+- Serve Go and lightweight-JVM backends specifically, **extensibly** (more languages later,
+  zero core churn), without the core naming a language.
 
 **Non-goals**
-- Generalising project-specific facts (a vendor console's API, host addresses, table names,
-  a repo's helper signatures, its directory naming). Those are *correctly* local and stay
-  where they are.
-- Replacing `superpowers`. This plugin must work standalone and interoperate when
-  superpowers is present.
-- Rewriting the design rule to accommodate stack opinions.
+- Porting **facts**. See §3.
+- `integration-instinct`, `external-systems`, or the 22-rule `engineering-standards`
+  absorption proposed in the first draft. All withdrawn.
+- Generalising project-local facts (vendor consoles, hosts, table names, helper signatures,
+  directory naming). They stay in the project, where the plugin already defers to them.
+- Replacing `superpowers`.
 
-## 3. The architectural insight
+## 3. The filter (why this shrank from 54 to ~5)
 
-The naive framing is *"sharp doctrine vs complete doctrine."* That tradeoff is false,
-because **adherence cost is not uniform**:
+The wrong test was *"would this bite a stranger?"* — every true statement about software
+passes it. The right test is:
 
-- **The gate is always-on.** Every line competes for attention on *every task, forever*.
-- **Skills load by description.** A skill that fires only on integration work costs
-  **nothing** on a CSS change.
+> **Is this a *fact the model already has*, or a *choice where you have a side*?**
 
-Therefore: **take nearly all of it, and pay the cost where it is cheap.** The constraint is
-not total rule count — it is **per-skill coherence** (one trigger, one job) and a **brutal
-gate**.
+- **Facts** — constant-time compare, UTC vs. calendar semantics, at-least-once dedupe,
+  async-after-commit, absent-vs-zero, retry + dead-letter, tenant scoping, mass assignment.
+  A capable model **already knows every one.** It doesn't fail to know them; it fails to
+  **stop and apply** them — which is precisely what the gate already forces. Writing them
+  down hands a lookup table to something that already has one. **Marginal. Do not ship.**
+- **Preferences** — *no framework by default*, *the entrypoint is the composition root*,
+  *no container / annotations / reflection*, *organise by feature not layer*, *one interface
+  per axis of change*. These are **contested** — half the industry runs the opposite and has
+  good reasons. **A model cannot infer your side.** Only you can supply it. **This is the
+  entire value.**
+- **Wrong-default** — a narrow third class: the model's *unprompted behaviour* is actively
+  incorrect, not just unconsidered. Worth stating even though it's "knowledge."
 
-This single observation drives every placement decision below.
+Everything below is preference or wrong-default. Nothing else ships.
 
-## 4. Architecture — three layers
+## 4. The distillation (the soul)
 
-### Layer 1 — Universal core (names no language)
-The gate + existing five skills + two new skills. Installs anywhere; useful to anyone.
+The Go and JVM opinions are **not two sets of rules. They are one conviction with two
+accents:**
 
-### Layer 2 — Stack packs (description-gated, self-limiting)
-Opinionated, **project-agnostic** setup guidance for a specific language/runtime. These are
-safe to ship in a universal plugin **because skills load by description**: a skill described
-*"Use when working in a Go backend service"* is *structurally incapable* of firing in a
-Rails repo. That is a property of the loading mechanism, not a convention we must police.
+> **Explicit over magic.** You should be able to read the whole dependency graph in one
+> file. The entrypoint is where everything is constructed. A framework is a decision to
+> surface, not a default.
 
-Adding a language later = one new directory. **Zero core files change.**
+*No Spring · no DI container · no annotations · no reflection · no classpath scanning · no
+`init()` · no package-level singletons · no framework-by-default* — every one of those is
+that single belief, wearing a language's clothes.
 
-### Layer 3 — Project-local (untouched, stays in the project)
-Facts. A project's own skills keep knowing their own truths, and this plugin continues to
-defer to them.
+**Therefore: the conviction goes in the core (language-free). Only the accent goes in a
+pack.** This is what keeps the core universal while the packs stay thin.
 
-**The line between Layer 2 and Layer 3 is the one that matters:**
+## 5. What ships
 
-> A stack pack holds **how you would set up *any* service in that language.**
-> A project skill holds **how *this* project's service is set up.**
+### 5.1 `skills/backend-shape/` — NEW (universal, names no language)
+The files/folders/code philosophy. Trigger: **designing or bootstrapping a backend service
+or component where the shape is your call.**
 
-Get that wrong and the pack leaks nouns — the exact failure the design rule exists to
-prevent.
+- **Organise by feature, not by layer.** A feature owns its transport, its decisions, and
+  its data access together. Layer-folders scatter one change across three directories and
+  make a feature's blast radius invisible.
+- **Each layer does only its job.** Transport parses, validates, delegates — it decides
+  nothing. Logic decides — it knows no transport and writes no queries. Data queries — it
+  holds no policy.
+- **Typed DTOs at every boundary; never the storage model on the wire.** They change for
+  different reasons — couple them and a column rename becomes an API break.
+- **The entrypoint is the composition root.** Construct everything explicitly, in one place,
+  and pass it in. You should read the whole dependency graph in one file. No container, no
+  annotations, no reflection, no package-level singletons. *(the soul)*
+- **A framework is a decision to surface, not a default.** Reach for the smallest thing that
+  does the job.
+- **Config is read once, at startup, into a typed value.** Missing required config crashes
+  at boot; optional gets an explicit default. Never read the environment from inside a call
+  path.
+- **One interface per axis of change, not per class.** Abstract what varies; leave the rest
+  concrete.
 
-## 5. The bar (what earns a line)
+**Deference (load-bearing):** in an existing codebase **its shape wins** —
+`engineering-standards` §1 ("fit the existing structure") outranks this skill. This is for
+when the choice is *actually yours*: greenfield, a new service, or a project with no answer.
+Stated in the skill body so it can never be read as "restructure their repo."
 
-Unchanged from the README, and applied to every rule below:
+### 5.2 `skills/go-service-shape/` — NEW (pack, description-gated)
+Only the accent:
+- **The stdlib and a thin router before a web framework.**
+- **No `init()` magic, no package-level singletons** — construct in `main`.
+- **An `Impl` suffix is fine when the interface owns the name and there is exactly one.** It
+  stops being fine at two.
+- The feature folder holds its transport, logic, data access, and its DTOs together.
 
-1. **Would this still be true in a project with a different stack, product, and team?**
-   - Yes → core, nouns stripped.
-   - Principle travels but the example doesn't → rewrite structurally.
-   - No, but it's true for *every* project in this language → **stack pack**.
-   - No → leave it in the project.
-2. **Does it change what an agent does?** *"Reuse your primitives"* is advice.
-   *"Reused twice → extract it"* is a standard. Only standards ship.
-3. **One line, with teeth.** Wording is the product. A rule that reads as a suggestion will
-   be treated as one.
+### 5.3 `skills/java-service-shape/` — NEW (pack, description-gated)
+Only the accent:
+- **No Spring.** A headless worker or a thin HTTP surface needs a `main()`, a router, and a
+  client — not a container, a classpath scan, and an annotation dialect.
+- **One artifact: `application` + a shadow fat jar**, `exec java -jar` as PID 1.
+- **`main()` is the composition root** — constructor wiring; no annotations, no reflection,
+  no classpath scanning.
+- **Name implementations for what they do, not `Impl`.** That convention disambiguates a
+  single implementation and becomes noise at three — the *reason* doesn't transfer from Go,
+  so neither should the tic.
 
-## 6. Placement map
+### 5.4 The wrong-default rules (~5)
+Only where the model's unprompted behaviour is incorrect:
 
-### 6.1 `core/GATE.md` — 4 edits only (always-on; keep brutal)
-- **Sharpen Q2** from *"trace one concrete failure"* to **trace fail / duplicate / late** —
-  a sharper instrument for any remote interaction.
-- **Expand Q5's pattern list** with: *derived read-model, reconciler, echo guard,
-  compensating action, contention-shaped lock.*
-- **Resolve the ask-cadence contradiction** (see §9).
-- Nothing else. Every other rule earns a skill or nowhere.
+| Rule | Home | Why it ships |
+|---|---|---|
+| **Replace-vs-merge: determine which before *any* external save/update call.** Assuming merge on a replace endpoint silently deletes everything you didn't send. Read-modify-write — and read first. | `engineering-standards` §3 | Models genuinely assume merge and wipe config |
+| **A business "no" is a success.** Three outcomes: success, retryable, poison. "The card was declined" is a *result* — record it and ack. | `engineering-standards` §4 | Models genuinely retry business failures forever |
+| **Enumerate what a provider does *not* emit.** Every un-evented mutation needs a poll. Push + reconcile, never push alone. | `engineering-standards` §3 | Models genuinely assume webhook coverage is complete |
+| **A control plane's success field means "accepted," not "live."** Verify the resulting artifact's identity, not the status code. | `verify-for-real` | Models genuinely trust `status: done` |
+| **A green build with a failed deploy is configuration, not code.** Changing code first destroys the evidence and adds a variable. | `verify-for-real` | Models genuinely edit code first |
 
-### 6.2 `skills/integration-instinct/` — NEW
-Trigger: consuming or producing events, webhooks, queues, or syncing with a remote system.
+### 5.5 `core/GATE.md` — 1 edit
+Resolve the **live contradiction**: the gate says *"One consolidated round, not a drip"*;
+`software-engineer-intuition` Step 4 repeats it; the source corpus's interviewing skill says
+*"one question at a time."* They conflict today.
 
-- **Three consumer outcomes: success / retryable / poison.** A *business* "no" is a
-  success — record the outcome and ack. Retrying a business failure forever is the queue
-  death spiral.
-- **Assume at-least-once *and unordered*.** Dedupe by the producer's event id with a TTL; a
-  missing local row means fetch-then-insert, not error.
-- **Enumerate what the producer does *not* emit.** Every un-evented mutation needs a
-  polling reconciler. Push + reconcile, never push alone.
-- **One kill-switch** every consumer path checks, flipped atomically the instant auth dies.
-- **Disconnect ≠ delete.** Keep the foreign identity mapping so reconnect is resumption;
-  clear only when the identity actually changes.
-- **Echo guard** on bidirectional sync, or the system oscillates.
-- **A job's identity is its inputs, not when it was scheduled.** A timestamp in the payload
-  makes dedupe impossible.
-- **Every retry needs a bound and a terminus.** Retry-forever with no dead-letter is data
-  loss disguised as resilience.
-- **Never assume producer boot order** — retry the attach with backoff. And never create the
-  resource you only consume; that forks ownership.
-- **An error you cannot fix by retrying must be acked and recorded**, not returned as
-  failure — providers disable subscriptions that keep failing.
+> **Consolidated round for *independent* forks. One at a time only when the answers are
+> *dependent*** — when a later question's content changes based on an earlier answer (a
+> design tree). Never a drip of independent questions.
 
-### 6.3 `skills/external-systems/` — NEW
-Trigger: calling a vendor API, a control plane, a deploy target, or handling their
-credentials.
+No other gate change. It is the only always-on surface and stays brutal.
 
-- **Replace-vs-merge: determine which before calling any "save"/"update" API.** Assuming
-  merge on a replace endpoint silently deletes everything you didn't send. Read-modify-write
-  — and *read first*.
-- **Find the immutable fields before creating a named external resource.** No rename
-  endpoint means recreate + re-wire every reference.
-- **An API that accepts a field and ignores it returns 200 and changes nothing.** Verify by
-  read-back, not status code.
-- **One refresher per refreshable credential**; everyone else fetches by RPC and caches
-  under TTL minus a margin. Concurrent refresh = dogpile + revocation.
-- **Inject expiring credentials as a provider function, not a value.** A value captured at
-  construction is stale by definition.
-- **Never copy a credential onto a dependent record**; reference the owning record.
-- **Rate limits are per-vendor-account** → the limiter lives inside the client, keyed by
-  that account. Detect tier from response headers; don't hardcode it.
-- **Don't hardcode IDs from a vendor's default config** — resolve by semantic property at
-  runtime and cache the resolution. Defaults vary per tenant.
-- **A green build with a failed deploy is configuration, not code.** Changing code first
-  destroys evidence and adds a variable.
-- **Never hand-edit state that CI owns** — a manual edit is invisible drift. And with mutable
-  tags, a new build is not a new deployment.
-- **A cache of remote config needs a named invalidation event.** A TTL is not invalidation.
-- **Never disable host-key verification to make a connection work.** Pin it.
-- **Repeated auth failure is a signal to stop, not to retry.** A credential that stops
-  working was more likely rotated than broken — retry loops escalate to a lockout you
-  cannot undo.
-- **Startup-time schema migration against a shared store makes deploy order a correctness
-  variable.** Declare one owner, or make every participant additive + idempotent.
+### 5.6 Verification — `test/smoke.sh` + a nouns check
+The plugin preaches *"a build is not a verification"* and cannot verify itself. Close it:
 
-### 6.4 `skills/engineering-standards/` — absorbs the most (~22)
-Two new sections plus extensions:
+1. **Claude** — manifests parse; every `skills/*/SKILL.md` has valid frontmatter with a
+   non-empty `name` + `description`; `hooks/hooks.json` parses; the hook is executable and
+   emits the gate.
+2. **OpenCode** — the plugin module imports; `config()` appends the skills path; the
+   transform injects **exactly once** and is idempotent on re-entry.
+3. **Codex** — `install.sh --codex --here` into a temp dir writes the block; **running it
+   twice yields an identical file** and preserves surrounding content.
+4. **Nouns check** — grep `core/` and every `skills/*/` **except `*-service-shape/`** for a
+   denylist of framework/vendor tokens, **word-boundaried** (an un-anchored grep flags
+   "plu*gin*" and "en*gin*eering" and a noisy check gets ignored — an ignored check is worse
+   than none). Packs are exempt from the *language* denylist (naming Go is their job) but
+   **not** from the *project*-noun denylist: a pack naming a company's helper, table, or
+   host has become a project skill wearing a language's name.
 
-**New § Trust boundaries and tenancy**
-- **Identity comes from the credential, never the payload.** At the edge, use a request type
-  that *physically cannot express* the identity fields, rather than remembering to overwrite
-  them.
-- **Trust boundaries are asymmetric.** The same field is spoofable at the edge and
-  authoritative behind it. Name where the boundary is.
-- **Where tenants share a table, every query is scoped by the tenant key.** A missing scope
-  is a *security incident*, not a bug. Tenancy identifiers pass through every hop unchanged.
-- **Internal endpoints get their own path namespace and their own auth**; the public gateway
-  must not route to them. The namespace makes the exposure audit greppable.
+This makes the design rule **executable**. It is the highest-leverage test in the repo.
 
-**New § Time semantics**
-- **Separate instants from calendar semantics.** An instant is UTC; a day boundary, reset,
-  or schedule is in the *user's* timezone. UTC for calendar semantics fails only for some
-  users, on some days.
+### 5.7 README + manifests
+- **Stack packs** — what they are, that the description *is* the isolation, and the
+  contract for adding a language: one `skills/<language>-service-shape/` directory, **zero
+  core changes**.
+- **superpowers** — works alone; sharper together. Where each wins.
+- Version → **0.2.0**.
 
-**§1 Fit the existing structure — extend**
-- **Wiring is code in one place.** You should read the whole dependency graph in one file.
-  No container, no annotation magic, no reflection.
-- **One interface per axis of change, not per class.**
-- **A gateway that forwards raw bytes and raw query strings is a tunnel, not a layer.** It
-  owns unmarshalling, typing, and a service seam *even when the service is a pass-through* —
-  the seam is where future logic lands.
-- **A second language needs a capability justification, not a preference.** When you add
-  one, map it 1:1 onto the existing layout and publish the mapping table — the cost of a new
-  stack is navigational.
-- **Mirror structure, not naming tics.** Drop a convention whose *reason* doesn't transfer
-  to the host language.
+## 6. Skill layout — flat, not nested
 
-**§2 Contract programming — extend**
-- **Read the server's parsing code before writing the client.** Never write to an assumed
-  contract; a shape mismatch is a runtime failure, not a compile error.
-- **N-place agreement's failure signature is "looks healthy, doesn't work."** Enumerate the
-  places in one doc.
-- **If duplication is forced, name one copy canonical and declare drift a bug.** A vendored
-  copy with no named source is a fork.
-- **Tolerant reader, strict writer.** Ignore unknown inbound fields so a producer can add
-  one without breaking you; omit nulls outbound.
-- **One sanctioned path per class of change.** Two mechanisms managing the same objects must
-  partition them explicitly; overlap is corruption.
+All three consumers discover skills **one level deep** (`install.sh` globs `skills/*/`). A
+`skills/stacks/<lang>/` layout would be silently omitted from the Codex block. The directory
+was never the isolation mechanism — **the description is.**
 
-**§3 Isolate the outside world — extend**
-- **Never let the storage model leak into the API contract.** They change for different
-  reasons.
-
-**§4 Errors — extend**
-- **Degrade deliberately and visibly, or fail loudly. Never silently.** A non-core upstream
-  is an *optional* dependency: boot and render without it, degrading the metric — not the
-  surface. *(Resolves the tension with the existing "a swallowed error that returns an empty
-  list" rule: the difference is whether the degradation is declared.)*
-
-**§5 Money, state, irreversible — extend**
-- **Async after commit.** Snapshot inputs by value, start only after the transaction
-  commits, always bound with a timeout.
-- **An idempotent upsert on the natural key removes the need for a lock** — replica-safety
-  becomes free.
-- **Compensate explicitly, including any counter you consumed.** A rollback that forgets the
-  quota is a slow leak.
-- **A partial update must distinguish absent from set-to-zero.** A plain value type cannot,
-  and you will silently blank fields.
-- **Fail fast at boot on missing required config**; optional config gets an explicit default.
-- **Pick the weakest background mechanism that meets the reliability bar** —
-  fire-and-forget → in-process loop → durable queue + separate worker.
-- **Name the concurrency primitive by contention shape** — contested row, work queue,
-  once-per-cluster.
-- **Every production mutation: open a transaction, SELECT the exact rows the predicate will
-  hit, read them, then commit.** Never write a predicate you have not first run as a read.
-  An ad-hoc query against a production table is a load event — bound it.
-- **Constant-time compare for secrets and signatures.**
-- **A security check that could break a live integration ships behind a per-env flag**, off
-  until end-to-end is green.
-
-### 6.5 `skills/verify-for-real/` — 1 high-value addition
-- **A control plane's success field means "accepted," not "live."** Verify the resulting
-  artifact's identity (digest/tag) and its timestamp. The system's own status field is not
-  evidence.
-
-### 6.6 `skills/git-discipline/` — 2 additions (new § Promotion)
-- **A promotion merges everything on the source branch, not your change.** Enumerate the
-  commit range before promoting — an integration branch accumulates other people's work.
-- **If you committed to a protected branch locally, create the branch at HEAD *first*, then
-  hard-reset.** The order is what saves the work.
-
-### 6.7 `skills/ui-craft/` — unchanged
-Zero UI content existed in the source corpus. No edit.
-
-### 6.8 Stack packs — NEW
-- `skills/go-service-shape/`
-- `skills/java-service-shape/`
-
-**Flat, not nested.** All three consumers discover skills one level deep — `install.sh`
-globs `skills/*/`, and plugin skill discovery is flat. A `skills/stacks/<lang>/` layout would
-be silently omitted from the Codex block and likely undiscovered elsewhere. The directory
-was never the isolation mechanism anyway.
-
-Contents: project-agnostic setup opinions only — no framework where a thin router will do;
-constructor wiring in `main` with no container; env config read once at startup and passed
-in; the fat-jar/worker shape for the JVM; idiom notes that only make sense per-language
-(e.g. an `Impl` suffix that disambiguates a single implementation is noise where there are
-three — adopt the host idiom when the original's *reason* doesn't transfer).
-
-**Description contract (load-bearing — this is the entire isolation mechanism):** each
-pack's `description` must name its language and runtime explicitly and lead with the
-trigger, so it cannot fire elsewhere. E.g. *"Use when writing or restructuring a Go backend
-service…"*.
-
-**Naming convention:** `<language>-service-shape`. This is what the nouns check keys off
-(§10) to permit language nouns in packs while forbidding them in the core.
-
-**Extensibility:** a new language = one new `skills/<lang>-service-shape/` directory. No
-core file changes. The README documents this as the contract.
+**Naming convention:** `<language>-service-shape`. The nouns check keys off it.
 
 ## 7. Interop with `superpowers`
 
-The plugin **works standalone and is sharper with superpowers installed.**
+Skills are static markdown and cannot self-disable. The only surface with runtime knowledge
+is the **gate injection**, which already exists as three thin adapters over one `GATE.md`:
+`hooks/session-start.sh`, `.opencode/plugins/senior-dephx.js`, `install.sh --codex`.
 
-**Mechanism.** Skills are static markdown and cannot self-disable. The only surface with
-runtime knowledge is the **gate injection** — which already exists in three thin adapters
-reading one `GATE.md`:
-
-- `hooks/session-start.sh` (Claude Code)
-- `.opencode/plugins/senior-dephx.js` (OpenCode)
-- `install.sh --codex` (Codex, resolved at install time)
-
-Each detects whether superpowers is present and, if so, appends one routing line to the
-injected gate:
-
-> *superpowers is installed — for generic debugging use `superpowers:systematic-debugging`;
-> for spec-shaped design use `superpowers:brainstorming`.*
-
-Additionally, each overlapping skill carries a **static deference note** so it remains
-correct even when detection fails or isn't available.
-
-**Keep the non-overlapping halves unconditionally.** superpowers owns *generic* debugging
-method; it does not carry the priors *"a green build with a failed deploy is configuration"*
-or *"the orchestrator's status field is not evidence."* Those ship regardless.
-
-README gains one honest paragraph stating: works alone; better together; who wins where.
+Each detects superpowers and, if present, appends one routing line to the injected gate
+(e.g. *"for generic debugging use `superpowers:systematic-debugging`; for spec-shaped design
+use `superpowers:brainstorming`"*). Correctness must **never depend on detection** — the
+plugin works standalone; detection only sharpens routing.
 
 ## 8. What is explicitly NOT ported
 
-- Every project-local fact: vendor console APIs, host addresses, table and column names,
-  helper signatures, directory naming, credential locations. These stay in the project's own
-  skills — the plugin already defers to them, and the audit's verdict was that they are *the
-  right kind of local*.
-- **`grill-me` is not ported.** ~75% of it is already in the gate, and its remaining novel
-  half is covered by `superpowers:brainstorming`.
+- All project-local facts. They stay. The audit's verdict: *"they are the right kind of
+  local."*
+- Every rule in the "facts" class (§3) — the model has them and the gate makes it use them.
+- The interviewing skill: ~75% already in the gate; the novel half is
+  `superpowers:brainstorming`'s job.
+- Rules that assume a microservice fleet with a broker (kill-switches across N consumers,
+  producer boot-order, never-create-the-stream, shared-DB deploy ordering). **That is one
+  architecture, not portable judgment.**
 
-## 9. A live contradiction to fix
+## 9. Rollout
 
-The source corpus's `grill-me` says *"ask one question at a time; batching is bewildering."*
-This gate says *"One consolidated round, not a drip"* — and `software-engineer-intuition`
-Step 4 repeats it. **These conflict**, and the conflict is live today.
+1. Gate cadence fix (1 edit).
+2. `backend-shape` — the centrepiece.
+3. The two packs.
+4. The five wrong-default rules into `engineering-standards` / `verify-for-real`.
+5. superpowers detection + static deference notes.
+6. `test/smoke.sh` + the nouns check.
+7. README + version 0.2.0.
 
-**Resolution (into the gate, one line):**
+## 10. Risks
 
-> **Consolidated round for *independent* forks; one question at a time only when the answers
-> are *dependent*** — i.e. when a later question's content changes based on an earlier
-> answer (a design tree). Never a drip of independent questions.
-
-## 10. Verification
-
-The plugin preaches *"a build is not a verification"* and currently cannot verify itself.
-This change closes that:
-
-- **`test/smoke.sh`** — proves all three install paths still wire up after any change:
-  1. Claude: `plugin.json` + `marketplace.json` parse; every `skills/**/SKILL.md` has valid
-     frontmatter with a non-empty `name` + `description`; `hooks/hooks.json` parses and the
-     hook is executable and emits the gate.
-  2. OpenCode: the plugin module imports; `config()` appends the skills path; the transform
-     injects exactly once and is idempotent on re-entry.
-  3. Codex: `install.sh --codex --here` into a temp dir writes the block; **running it twice
-     produces an identical file** (idempotence) and preserves surrounding content.
-- **A nouns check** — grep `core/` and every `skills/*/` **except `*-service-shape/`** for a
-  denylist of framework/vendor/language tokens. The design rule becomes *executable*, not
-  aspirational. This is the highest-leverage test in the repo.
-  - Packs are exempt from the *language* denylist (naming Go is their job) but **not** from
-    the *project*-noun denylist — a pack that names a company's helper, table, or host has
-    become a project skill wearing a language's name.
-
-## 11. Rollout
-
-1. Gate edits (4) + the cadence resolution.
-2. `integration-instinct` + `external-systems` (the two gap-filling skills).
-3. `engineering-standards` absorption (the bulk).
-4. `verify-for-real` + `git-discipline` additions.
-5. Stack packs + the extensibility contract in the README.
-6. superpowers detection in the three adapters + static deference notes.
-7. `test/smoke.sh` + the nouns check.
-8. README: stack-pack paragraph, superpowers paragraph, version → 0.2.0.
-
-Each step is independently reviewable. Steps 1–4 are pure doctrine; 5–8 are wiring.
-
-## 12. Risks
-
-- **Volume dilutes the gate.** Mitigated by the §3 insight: the gate takes only 4 edits;
-  everything else lives behind a description.
-- **A stack pack leaks project nouns** — it becomes "this project's setup" wearing a
-  language's name. Mitigated by the §4 Layer-2/3 line and the nouns check (which must cover
-  packs for *project* nouns while permitting *language* nouns).
-- **Wording softens under volume.** 54 rules written quickly become advice. The §5 bar is the
-  control; each rule ships as one line with teeth or doesn't ship.
-- **superpowers detection is best-effort** across three tools. Mitigated by the static
-  deference notes — correctness never depends on detection succeeding.
+- **`backend-shape` reads as "restructure their repo."** Mitigated by the §5.1 deference
+  clause: the existing codebase's shape always wins; this fires only when the choice is
+  yours.
+- **A pack leaks project nouns** — becomes a project skill wearing a language's name.
+  Mitigated by the nouns check covering packs for *project* nouns.
+- **Wording softens.** Preferences stated softly read as suggestions and change nothing. One
+  line, with teeth, or it doesn't ship.
+- **Scope creeps back.** The §3 filter is the control. If a proposed rule is something the
+  model already knows, it does not ship — no matter how true it is.
