@@ -13,6 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$ROOT/core/GATE.md"
+SUPER="$ROOT/core/SUPERPOWERS.md"
 BEGIN="<!-- BEGIN senior-dephx -->"
 END="<!-- END senior-dephx -->"
 
@@ -30,6 +31,18 @@ render_agents_block() {
     desc="$(awk '/^description:/{sub(/^description: */,""); print; exit}' "$d/SKILL.md")"
     printf -- "- \`%s\` — %s\n  \`%sSKILL.md\`\n" "$name" "${desc:0:150}…" "$d"
   done
+  # The other two adapters detect the sibling plugin at runtime and emit this only when it
+  # is really there. Codex has no runtime, so the text goes in unconditionally and the
+  # condition moves into the prose. Same file, never re-typed: a second copy of the map
+  # would drift from the one the hooks emit.
+  if [ -f "$SUPER" ]; then
+    printf '\n> **Read the next section only if `superpowers` is installed here.** This plugin\n'
+    printf '> stands alone and needs nothing else; everything above holds on its own, and it may\n'
+    printf '> work even better alongside that plugin. IF those skills are present, they and these\n'
+    printf '> defer as described below. If they are not, skip it: nothing named there is required\n'
+    printf '> for any rule above to hold.\n\n'
+    cat "$SUPER"
+  fi
   printf '\n%s\n' "$END"
 }
 

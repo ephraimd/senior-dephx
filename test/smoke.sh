@@ -47,6 +47,42 @@ case "$hook_out" in
   *) fail "hook did not emit the gate" ;;
 esac
 
+echo "== hook defers to the sibling plugin only when it is installed =="
+# BOTH branches, against a real search root. A detection test that only exercises the
+# present-branch cannot tell "correctly silent" from "silently broken" - and the negative
+# is the branch that carries the promise this plugin makes: it works alone.
+# SENIOR_DEPHX_PLUGIN_SEARCH exists so this is testable without installing anything.
+FRAGMENT='superpowers owns the procedure'
+sp_yes="$(mktemp -d)"; mkdir -p "$sp_yes/superpowers"
+sp_no="$(mktemp -d)"
+
+# Capture, don't pipe - see the gate check above for why `grep -q` cannot be used here.
+yes_out="$(CLAUDE_PLUGIN_ROOT="$ROOT" SENIOR_DEPHX_PLUGIN_SEARCH="$sp_yes" "$ROOT/hooks/session-start.sh" 2>/dev/null)"
+case "$yes_out" in
+  *"$FRAGMENT"*) pass "installed: hook emits the deference fragment" ;;
+  *) fail "installed: hook did not emit the deference fragment" ;;
+esac
+case "$yes_out" in
+  *"The Gate"*) pass "installed: the gate survives alongside the fragment" ;;
+  *) fail "installed: the fragment displaced the gate" ;;
+esac
+
+# A root that does not exist is deliberately in the path: a missing dir must read as "not
+# installed", never as an error. The hook runs under `set -e`, so this asserts the exit
+# status too - a hook that dies emits no gate at all, which is the worst outcome here.
+no_rc=0
+no_out="$(CLAUDE_PLUGIN_ROOT="$ROOT" SENIOR_DEPHX_PLUGIN_SEARCH="$sp_no:$sp_no/absent" "$ROOT/hooks/session-start.sh" 2>/dev/null)" || no_rc=$?
+case "$no_out" in
+  *"$FRAGMENT"*) fail "absent: hook emitted the deference fragment with no sibling installed" ;;
+  *) pass "absent: hook stays silent about the sibling" ;;
+esac
+case "$no_out" in
+  *"The Gate"*) pass "absent: the gate is emitted anyway (the plugin stands alone)" ;;
+  *) fail "absent: hook did not emit the gate" ;;
+esac
+if [ "$no_rc" -eq 0 ]; then pass "absent: hook exits 0"; else fail "absent: hook exited $no_rc"; fi
+rm -rf "$sp_yes" "$sp_no"
+
 echo "== nouns: the core names no framework/vendor (the design rule, executable) =="
 # Two tiers, because one grep cannot serve both halves of this list.
 # TIER1 has no ordinary-English meaning, so a case-insensitive word-boundary match is safe.

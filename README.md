@@ -158,6 +158,31 @@ Your project's own rules (`AGENTS.md`, `CLAUDE.md`, its own skills) stay where t
 **win on facts**. This plugin wins on procedure. **You win over both** — if your
 instruction and any default disagree, the default loses, out loud.
 
+## A note on `superpowers`
+
+**This plugin stands alone.** Install nothing alongside it and every rule above still
+holds. It also sits well next to the `superpowers` plugin, and is probably better with it.
+
+The two are adjacent, not overlapping. Nothing here is suppressed when that plugin is
+present, and nothing there is restated here. Where they touch, the split is one line:
+**superpowers owns the procedure; this plugin owns the judgment and the policy.**
+
+- `verification-before-completion` owns the law that you may not claim done without fresh
+  evidence. `verify-for-real` owns *what* to exercise: a build is not a verification, run
+  the migration twice, don't trust a control plane's success field.
+- `brainstorming` and `systematic-debugging` own the procedure for designing and for
+  debugging. `software-engineer-intuition` owns the judgment the gate demands: blast
+  radius, prior art, what breaks.
+- `finishing-a-development-branch` and `using-git-worktrees` own the procedure for landing
+  work. `git-discipline` owns the policy that constrains it, and policy outranks procedure
+  where they touch.
+
+`engineering-standards`, `ui-craft`, and the rest have no counterpart there.
+
+Claude Code and OpenCode **detect it at runtime** and say this only when it is genuinely
+installed. Codex can't detect anything, so it gets the same text under an "if it's
+installed" sentence. Either way, you're never pointed at a skill that isn't there.
+
 ## A note on Codex
 
 Codex has **no plugin or skill system**. `AGENTS.md` is the entire extension surface — no
@@ -190,6 +215,7 @@ does.
 
 ```
 core/GATE.md                      one gate, three consumers
+core/SUPERPOWERS.md               the deference map, emitted only when superpowers is there
 skills/*/SKILL.md                 the doctrine
 hooks/                            Claude Code SessionStart injection
 .opencode/plugins/                OpenCode: skills path + gate injection

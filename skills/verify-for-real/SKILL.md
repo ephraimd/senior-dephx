@@ -11,6 +11,10 @@ Neither proves the thing does what you said it does.
 The rule: **run it, exercise the path that changed, and read the output.** Then say what
 you observed, not what you expect.
 
+If `verification-before-completion` is loadable, it owns the law - no completion claim
+without fresh evidence - so point at it instead of re-arguing it, and spend your effort
+here, on *what* to exercise. If it is not, this file carries both halves on its own.
+
 ## Why this is a skill and not a footnote
 
 Real failures that a green build reported as fine:

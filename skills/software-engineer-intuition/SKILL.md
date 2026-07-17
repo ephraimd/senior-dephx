@@ -112,6 +112,11 @@ facts. This plugin ships the domain-agnostic set:
 A project's own skills (its stack, its deploy flow, its copy voice) take precedence for
 their domain. If no skill covers the domain, read the project's rules files first.
 
+Where `brainstorming` (before a plan) and `systematic-debugging` (on a bug) are loadable,
+they own the procedure: route to them rather than hand-rolling a worse version, and keep
+Steps 1-4 as yours - they are the judgment no procedure supplies. Where they are not, this
+skill is complete without them.
+
 ## Red flags - stop and re-brief
 
 | You catch yourself... | It means |
