@@ -66,7 +66,12 @@ TIER1_NOUNS='golang|jvm|nestjs|django|laravel|gorm|postgres|postgresql|mysql|mon
 TIER2_NOUNS='Go|Java|Spring|Node|Express|Rails|Flask|React|Vue|Gin|Echo|Fiber|Maven|Hibernate'
 TIER2_QUALIFIER='service|app|application|component|module|framework|library|package|handler|router|controller|struct|project|backend|server'
 MD_PUNCT='[`"'"'"'*_(]*'
-PROJECT_NOUNS='revhero|dokploy|hubspot|pipedrive|safedbquery|respondok'
+# Companies, products, repositories, hosts. NOT the author's helper vocabulary: a blueprint
+# exists to define names like RespondOK or SafeDBQuery so a fresh repo can build them, and
+# banning them would stop the house style from naming itself. The rule the doctrine actually
+# states is "never cite a helper as though it already exists somewhere" - that is a claim
+# about context, which no grep can see. Review owns it; this list owns the proper nouns.
+PROJECT_NOUNS='revhero|dokploy|hubspot|pipedrive'
 for d in "$ROOT"/core "$ROOT"/skills/*/; do
   n="$(basename "$d")"
   case "$n" in *-backend-blueprint) continue ;; esac   # blueprints may name their language/libs
