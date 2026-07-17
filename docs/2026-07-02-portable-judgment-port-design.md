@@ -135,6 +135,26 @@ not load for general work in this language** — `backend-shape` covers that. A 
 applied unasked is the "technically correct, wrong context" slop this plugin exists to
 prevent.
 
+**Two modes, both explicit:**
+1. **Greenfield** — build a new service to this standard.
+2. **Full refactor** — bring an existing project *to* this standard.
+
+**Mode 2 deliberately overrides `backend-shape`'s deference and `engineering-standards` §1
+("fit the existing structure").** That is not a conflict — it is the authority ladder
+working: **human > project > plugin.** *"Fit what's there"* is the correct default precisely
+because nobody asked; **invoking this blueprint by name IS the human asking**, and the human
+outranks the default. This is the strongest reason the skill must never auto-load: the only
+thing permitted to override "fit the existing structure" is an explicit instruction to do so.
+The skill body must state this, and must still **surface the scope** before restructuring
+(which resources, which layers, in what order) rather than rewriting a repo unprompted.
+
+**Concreteness bar:** the blueprint is used to *build*, not to *cite*. It names and sketches
+the canonical helpers, envelopes, and wiring so a **fresh repository can construct them from
+this document alone**. The author's helper vocabulary (response helper, safe-query wrapper,
+paginated-query executor, etc.) is part of the house style and ships **by name** — that is
+opinion, which §3 says is the whole point. What may never appear is a company, product,
+repo, host, or a reference to a helper as though it already exists somewhere.
+
 **First: `go-backend-blueprint`.** Scope — the full pattern, buildable from scratch:
 - `main` as the composition root: construction order, wiring, graceful start
 - **resource cleanup at shutdown** — signal handling, ordered teardown, in-flight drain
