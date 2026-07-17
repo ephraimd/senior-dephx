@@ -298,23 +298,23 @@ func (s *Service) Create(
 	ctx context.Context,
 	sc domain.Scope,
 	in CreateOrder,
-) (*Order, error) {
+) (Order, error) {
 	// Priced before anything opens; the unknown-SKU mapping is elided here and lives
 	// in references/data-layer.md.
 	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 	defer tx.Rollback()
 
 	order, err := s.store.Insert(ctx, tx, sc, in, unit*int64(in.Qty))
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 
 	// The row is not committed. The consumer reads on its own connection, in its
@@ -325,7 +325,7 @@ func (s *Service) Create(
 	s.jobs.Enqueue(ctx, ReceiptJob{OrderID: order.ID})
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return Order{}, err
 	}
 	return order, nil
 }
@@ -357,14 +357,14 @@ func (s *Service) Create(
 	ctx context.Context,
 	sc domain.Scope,
 	in CreateOrder,
-) (*Order, error) {
+) (Order, error) {
 	// Priced before the transaction opens; see references/data-layer.md.
 	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 
-	var order *Order
+	var order Order
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var err error
 		order, err = s.store.Insert(ctx, tx, sc, in, unit*int64(in.Qty))
@@ -379,7 +379,7 @@ func (s *Service) Create(
 		})
 	})
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 	return order, nil
 }
@@ -394,10 +394,10 @@ func (s *Service) Create(
 	ctx context.Context,
 	sc domain.Scope,
 	in CreateOrder,
-) (*Order, error) {
+) (Order, error) {
 	order, err := s.createCommitted(ctx, sc, in)
 	if err != nil {
-		return nil, err
+		return Order{}, err
 	}
 	// The tenant is in the key for the same reason the job carries one: the Worker
 	// reads this off a channel, with no request behind it to ask.

@@ -396,6 +396,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	sc := domain.Scope{TenantID: id.TenantID}
 	out, err := h.svc.Create(r.Context(), sc, CreateOrder{ // delegate
 		ActorID:    id.UserID,
+		ActorRole:  id.Role,
 		CustomerID: req.CustomerID,
 		SKU:        req.SKU,
 		Qty:        req.Qty,
@@ -416,28 +417,42 @@ different answer for a request that is valid. That is the line, and it is not "n
 function.
 
 ```go
-// ✘ Two business rules, living in one entry point.
+// ✘ A pricing rule, living in one entry point.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	...
-	if req.Qty > 100 && id.Role != "wholesale" {
+	unit, err := h.svc.store.PriceOf(r.Context(), sc, req.SKU)
+	if err != nil {
+		httpx.RespondError(w, r, err)
+		return
+	}
+	if unit*int64(req.Qty) > 100_000 && id.Role != "wholesale" {
 		httpx.RespondError(w, r, domain.ErrForbidden)
 		return
 	}
-	if req.Qty > 10 {
-		req.Priority = "bulk"
-	}
-	out, err := h.svc.Create(r.Context(), sc, toInput(req, id))
+	out, err := h.svc.Create(r.Context(), sc, CreateOrder{...}) // delegate, finally
 	...
 }
 ```
 
 The importer creates orders. The queue consumer that replays a failed order creates
 orders. The admin endpoint creates orders. None of them go through this function, so
-three of the four paths do not have the wholesale rule and never had it. No test
-fails, because the test for this rule is a handler test and the handler still passes
-it. You find out from an invoice.
+three of the four paths do not have the limit and never had it. No test fails, because
+the test for this rule is a handler test and the handler still passes it. You find out
+from an invoice.
+
+Look at what the handler had to do to get its branch: reach through the service for a
+price the service is about to read again one line later, and compute the same total
+twice. That reach is the tell. The price is the server's to resolve (`PriceOf` and the
+paragraph on where the price comes from, in `references/data-layer.md`), and
+`Service.Create` already resolves it - which is where a decision that depends on it
+belongs.
 
 ```go
+const (
+	wholesaleLimitCents = 100_000
+	RoleWholesale       = "wholesale"
+)
+
 // ✔ The rule is where the decision is made, so every caller gets it: this endpoint,
 // the importer, the consumer, and the one somebody writes next year without reading
 // this file.
@@ -446,10 +461,14 @@ func (s *Service) Create(
 	sc domain.Scope,
 	in CreateOrder,
 ) (Order, error) {
-	if in.Qty > bulkThreshold && in.ActorRole != RoleWholesale {
-		return Order{}, fmt.Errorf("%w: bulk quantity requires wholesale", domain.ErrForbidden)
+	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
+	if err != nil {
+		return Order{}, err
 	}
-	in.Priority = priorityFor(in.Qty)
+	if unit*int64(in.Qty) > wholesaleLimitCents && in.ActorRole != RoleWholesale {
+		return Order{}, fmt.Errorf("%w: over limit requires wholesale", domain.ErrForbidden)
+	}
+	// The transaction, the Insert, the enqueue: references/data-layer.md.
 	...
 }
 ```
