@@ -8,6 +8,11 @@
 
 **Tech Stack:** Markdown doctrine + bash. No compiler, no unit tests — **verification is the smoke test, the nouns check, and the gating check.**
 
+**Dependency note:** the manifest checks shell out to `python3`. Every check that appends to
+`test/smoke.sh` must not assume more than bash + coreutils + `python3`; if `python3` is
+absent the manifest checks must say so plainly rather than report "does not parse", which
+would be a lie about the file.
+
 **Spec:** `docs/2026-07-02-portable-judgment-port-design.md`. **Branch:** `feat/portable-judgment-port`.
 
 ---
@@ -61,7 +66,12 @@ for d in "$ROOT"/skills/*/; do
   s="$d/SKILL.md"; n="$(basename "$d")"
   [ -f "$s" ] || { fail "$n has no SKILL.md"; continue; }
   name="$(awk -F': *' '/^name:/{print $2; exit}' "$s")"
-  desc="$(awk -F': *' '/^description:/{print substr($0, index($0,$2)); exit}' "$s")"
+  # Strip the key, keep the rest verbatim: descriptions contain their own colons, so
+  # splitting on ':' truncates them. (substr($0,index($0,$2)) looks equivalent but returns
+  # the WHOLE line when the value is empty — index($0,"") is 1 — which makes the empty
+  # check unfireable. That bug shipped in the first draft of this plan and was caught only
+  # by running the mutation in Step 3. This is why Step 3 exists.)
+  desc="$(awk '/^description:/{sub(/^description:[[:space:]]*/, ""); print; exit}' "$s")"
   [ -n "$name" ] || fail "$n: empty name"
   [ -n "$desc" ] || fail "$n: empty description"
   [ -n "$name" ] && [ -n "$desc" ] && pass "$n frontmatter"
@@ -69,7 +79,14 @@ done
 
 echo "== hook is executable and emits the gate =="
 if [ -x "$ROOT/hooks/session-start.sh" ]; then pass "hook executable"; else fail "hook not executable"; fi
-if CLAUDE_PLUGIN_ROOT="$ROOT" "$ROOT/hooks/session-start.sh" 2>/dev/null | grep -q "The Gate"; then pass "hook emits gate"; else fail "hook did not emit the gate"; fi
+# Capture, don't pipe. `grep -q` exits on first match and SIGPIPEs the hook mid-write; the
+# hook's own `set -e` turns that into exit 141, and pipefail here would report a false
+# failure for a hook that emitted the gate perfectly well.
+hook_out="$(CLAUDE_PLUGIN_ROOT="$ROOT" "$ROOT/hooks/session-start.sh" 2>/dev/null)"
+case "$hook_out" in
+  *"The Gate"*) pass "hook emits gate" ;;
+  *) fail "hook did not emit the gate" ;;
+esac
 
 echo
 [ "$FAIL" -eq 0 ] && echo "smoke: PASS" || echo "smoke: FAIL"
