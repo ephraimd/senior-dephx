@@ -41,16 +41,16 @@ Scale to the blast radius. Trivial edits need none of this.
    with the real symptom, restore it. A test that passes against broken code is decoration.
 6. **Run the whole suite**, not just your file. Your change's blast radius is not your
    file's blast radius.
-7. **Clean up everything you started.** Kill the processes, remove the temp files and
-   scratch scripts, close the browser. Never leave them for the human, and never commit
-   them.
-8. **Do not trust a control plane's own success field.** "Accepted" is not "live". Read the
+7. **Do not trust a control plane's own success field.** "Accepted" is not "live". Read the
    resulting artifact back - its identity (digest, tag, version) and its timestamp - and
    confirm it is the thing you just shipped. An API that accepts a field and ignores it
    still returns 200.
-9. **A green build with a failed deploy is configuration, not code.** Changing code first
+8. **A green build with a failed deploy is configuration, not code.** Changing code first
    destroys the evidence and adds a variable to a system that already has too many. Read
    the config, the env, and the wiring before you touch a line.
+9. **Clean up everything you started.** Kill the processes, remove the temp files and
+   scratch scripts, close the browser. Never leave them for the human, and never commit
+   them.
 
 ## Migrations, backfills, and workers
 
