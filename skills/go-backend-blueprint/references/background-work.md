@@ -299,13 +299,20 @@ func (s *Service) Create(
 	sc domain.Scope,
 	in CreateOrder,
 ) (*Order, error) {
+	// Priced before anything opens; the unknown-SKU mapping is elided here and lives
+	// in references/data-layer.md.
+	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	order, err := s.store.Insert(ctx, tx, sc, in)
+	order, err := s.store.Insert(ctx, tx, sc, in, unit*int64(in.Qty))
 	if err != nil {
 		return nil, err
 	}
@@ -351,11 +358,16 @@ func (s *Service) Create(
 	sc domain.Scope,
 	in CreateOrder,
 ) (*Order, error) {
-	var order *Order
+	// Priced before the transaction opens; see references/data-layer.md.
+	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
+	if err != nil {
+		return nil, err
+	}
 
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	var order *Order
+	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		order, err = s.store.Insert(ctx, tx, sc, in)
+		order, err = s.store.Insert(ctx, tx, sc, in, unit*int64(in.Qty))
 		if err != nil {
 			return err
 		}

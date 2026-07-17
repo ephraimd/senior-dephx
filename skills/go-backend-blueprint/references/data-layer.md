@@ -144,21 +144,70 @@ a write into the wrong tenant is the read leak with a longer half-life.
 ```go
 // internal/order/store.go
 
+// totalCents is a parameter for the same reason sc is. CreateOrder is what the client
+// asked for; the price is what this server decided, and the two do not belong in one
+// struct where the second can be left at zero. See PriceOf, below, for where it comes
+// from.
 func (s *Store) Insert(
 	ctx context.Context,
 	db dbx.DB,
 	sc domain.Scope,
 	in CreateOrder,
+	totalCents int64,
 ) (Order, error) {
 	if err := sc.Validate(); err != nil {
 		return Order{}, err
 	}
-	// insert into orders (tenant_id, ...) values ($1, ...) returning ...
-	// tenant_id is sc.TenantID, the statement is inside SafeDBQuery, and the handle
-	// is db - the one the caller opened, not one this method went and found.
-	...
+	var o Order
+	// The handle is db - the one the caller opened, not one this method went and
+	// found - so this row and the outbox row commit together or not at all.
+	err := dbx.SafeDBQuery(ctx, "order.Insert", func() error {
+		const q = `
+			insert into orders (tenant_id, customer_id, total_cents, status)
+			values ($1, $2, $3, $4)
+			returning id, tenant_id, customer_id, total_cents, status, created_at`
+		return scanOrder(
+			db.QueryRowContext(ctx, q, sc.TenantID, in.CustomerID, totalCents, "pending"),
+			&o,
+		)
+	})
+	return o, err
 }
 ```
+
+### Where the price comes from
+
+`orders.total_cents` is `not null` with no default, so `Insert` cannot be written until
+somebody says what an order costs. **The server says.** The client sent a `SKU` and a
+`Qty`; what those are worth is a fact this service owns, and it reads it from the
+`products` table in the schema at the end of this file:
+
+```go
+// internal/order/store.go
+
+// PriceOf takes no handle: it is the whole unit by itself, and it runs before the
+// transaction opens rather than inside it. The total it produces is snapshotted onto
+// the order row, which is what makes a price change next week harmless to what a
+// customer was charged last week.
+func (s *Store) PriceOf(ctx context.Context, sc domain.Scope, sku string) (int64, error) {
+	if err := sc.Validate(); err != nil {
+		return 0, err
+	}
+	var cents int64
+	err := dbx.SafeDBQuery(ctx, "order.PriceOf", func() error {
+		const q = `
+			select unit_cents
+			  from products
+			 where tenant_id = $1 and sku = $2`
+		return s.db.QueryRowContext(ctx, q, sc.TenantID, sku).Scan(&cents)
+	})
+	return cents, err
+}
+```
+
+No `sql.ErrNoRows` leaves this method. `Translate` already turns it into
+`domain.ErrNotFound`, so an unknown SKU arrives at the service as a domain error and
+the store does not grow a second vocabulary for missing rows.
 
 ## `SafeDBQuery`: a panic becomes an error
 
@@ -445,10 +494,25 @@ func (s *Service) Create(
 	sc domain.Scope,
 	in CreateOrder,
 ) (Order, error) {
+	// Priced before the transaction opens, because the catalog read is not part of
+	// the unit the order row belongs to and holding a transaction across it buys
+	// nothing.
+	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			// The SKU came off the wire, so its absence is a bad request. Passing
+			// ErrNotFound up 404s the POST and sends the caller hunting for an order
+			// that was never created.
+			return Order{}, fmt.Errorf("%w: unknown sku %q", domain.ErrInvalid, in.SKU)
+		}
+		return Order{}, err
+	}
+	totalCents := unit * int64(in.Qty)
+
 	var out Order
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		out, err = s.store.Insert(ctx, tx, sc, in)
+		out, err = s.store.Insert(ctx, tx, sc, in, totalCents)
 		return err
 	})
 	if err != nil {
@@ -471,7 +535,7 @@ same time, and one of the two would get used.
 ```go
 // ✘
 err := s.tx(ctx, func(tx *sql.Tx) error {
-	out, err := s.store.Insert(ctx, tx, sc, in)
+	out, err := s.store.Insert(ctx, tx, sc, in, totalCents)
 	if err != nil {
 		return err
 	}
@@ -946,6 +1010,17 @@ create table customers (
     -- The tenant leads the key. Not beside it, in it.
     primary key (tenant_id, id),
     unique (tenant_id, id)
+);
+
+-- The catalog is tenant-owned like everything else. Two tenants sell the same SKU at
+-- different prices, and a PriceOf that forgets the tenant charges one of them the
+-- other's price - quietly, and in the customer's favour exactly half the time.
+create table products (
+    tenant_id  bigint not null,
+    sku        text   not null,
+    unit_cents bigint not null check (unit_cents >= 0),
+
+    primary key (tenant_id, sku)
 );
 
 create table orders (

@@ -391,8 +391,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.svc.Create(r.Context(), CreateOrder{ // delegate
-		TenantID:   id.TenantID,
+	// The tenant is an argument, not a field. See the end of this file for why the
+	// input struct is not allowed to carry one.
+	sc := domain.Scope{TenantID: id.TenantID}
+	out, err := h.svc.Create(r.Context(), sc, CreateOrder{ // delegate
 		ActorID:    id.UserID,
 		CustomerID: req.CustomerID,
 		SKU:        req.SKU,
@@ -424,7 +426,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Qty > 10 {
 		req.Priority = "bulk"
 	}
-	out, err := h.svc.Create(r.Context(), toInput(req, id))
+	out, err := h.svc.Create(r.Context(), sc, toInput(req, id))
 	...
 }
 ```
@@ -439,7 +441,11 @@ it. You find out from an invoice.
 // ✔ The rule is where the decision is made, so every caller gets it: this endpoint,
 // the importer, the consumer, and the one somebody writes next year without reading
 // this file.
-func (s *Service) Create(ctx context.Context, in CreateOrder) (Order, error) {
+func (s *Service) Create(
+	ctx context.Context,
+	sc domain.Scope,
+	in CreateOrder,
+) (Order, error) {
 	if in.Qty > bulkThreshold && in.ActorRole != RoleWholesale {
 		return Order{}, fmt.Errorf("%w: bulk quantity requires wholesale", domain.ErrForbidden)
 	}
@@ -1056,17 +1062,30 @@ type createOrderRequest struct {
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createOrderRequest
 	httpx.DecodeJSON(w, r, &req)
-	// Every field in req came from the internet. TenantID included. This endpoint
-	// now writes into any tenant the caller can guess an integer for, and the write
-	// looks completely legitimate in every log and every audit trail you have.
-	out, err := h.svc.Create(r.Context(), CreateOrder(req))
+	// Every field in req came from the internet. TenantID included. Create demands a
+	// Scope and this one is fully populated, so nothing here looks unfinished. This
+	// endpoint now writes into any tenant the caller can guess an integer for, and
+	// the write looks completely legitimate in every log and every audit trail you
+	// have.
+	sc := domain.Scope{TenantID: req.TenantID} // straight off the wire
+	out, err := h.svc.Create(r.Context(), sc, CreateOrder{
+		CustomerID: req.CustomerID,
+		SKU:        req.SKU,
+		Qty:        req.Qty,
+	})
 	...
 }
 ```
 
-Nobody writes that on purpose. It arrives by convenience: the service input needed a
-`TenantID`, the request struct was right there, and one `CreateOrder(req)` conversion
-saved four lines. The reviewer sees a struct conversion.
+Nobody writes that on purpose. It arrives by convenience: `Create` demanded a `Scope`,
+the request already had a `tenant_id` on it, and the handler wired the one to the
+other without anybody deciding to. The reviewer sees a populated struct and a
+satisfied compiler.
+
+That is the exact limit of what a required parameter buys. It makes tenancy impossible
+to **forget**, because the call does not compile without one. It says nothing about
+where the value came from. Only the edge type can answer that, by having no such field
+to read.
 
 **The fix is not to remember to overwrite the field. It is that the field must not
 exist.**
@@ -1081,10 +1100,9 @@ type createOrderRequest struct {
 	Qty        int    `json:"qty"`
 }
 
-// The internal input HAS tenancy, and it is required. A caller that does not supply
-// it does not compile.
+// The internal input carries what the client asked for. It cannot express tenancy
+// either: that travels beside it, as a Scope the compiler demands at every call.
 type CreateOrder struct {
-	TenantID   int64
 	ActorID    int64
 	ActorRole  string
 	CustomerID int64
@@ -1112,10 +1130,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.svc.Create(r.Context(), CreateOrder{
-		TenantID:   id.TenantID, // from the credential
-		ActorID:    id.UserID,   // from the credential
-		ActorRole:  id.Role,     // from the credential
+	sc := domain.Scope{TenantID: id.TenantID} // from the credential
+	out, err := h.svc.Create(r.Context(), sc, CreateOrder{
+		ActorID:    id.UserID, // from the credential
+		ActorRole:  id.Role,   // from the credential
 		CustomerID: req.CustomerID,
 		SKU:        req.SKU,
 		Qty:        req.Qty,
@@ -1128,15 +1146,34 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-The mapping is four lines of typing that a struct conversion would have saved. Those
-four lines are the security boundary. `DisallowUnknownFields` in `DecodeJSON` is the
+The mapping is a few lines of typing that a struct conversion would have saved. Those
+lines are the security boundary. `DisallowUnknownFields` in `DecodeJSON` is the
 second half of it: a client that sends `tenant_id` to this endpoint now gets a 400
 that says the field does not exist, and you get a log line saying somebody tried.
+
+**A struct field can be left zero and still compile. A required parameter cannot be
+left out at all.** That is why `CreateOrder` has no `TenantID` even though nothing on
+the wire could reach it: tenancy inside the input type makes every future
+construction of that struct a place to forget it, and `TenantID: 0` compiles and
+passes review. `Scope.Validate` in `references/data-layer.md` exists because of what
+a zero tenant does the day it finally matches something. Tenancy as a parameter is a
+thing the compiler demands at every call, including the calls written next year by
+someone who never read this file. Same rule as the edge type, one layer in: make the
+wrong version unrepresentable rather than forbidden.
 
 The same rule holds for path and query parameters. `GET /v1/orders/{id}` is not
 authorised by the URL: the store scopes by `sc.TenantID`, so an id belonging to
 another tenant returns `ErrNotFound` and a 404. **Not a 403** - a 403 confirms the
 row exists, which is the fact you were hiding.
+
+**Identity is not the only thing you must never take from the payload.** Anything the
+server owns - the price, the tenant, the status, the timestamps - is a thing a client
+is not permitted to assert. Notice what `createOrderRequest` does not have: a
+`TotalCents`. A `TotalCents` on the wire is a client naming its own price, and it will
+be a zero, or a negative, or a discount nobody authorised. `Service.Create` resolves
+the price from the catalog instead (`references/data-layer.md`), which is why `SKU`
+and `Qty` are the only things this endpoint accepts about what an order is worth. The
+rule is not about identity; identity is just its most dangerous instance.
 
 ### The context key is a type
 
