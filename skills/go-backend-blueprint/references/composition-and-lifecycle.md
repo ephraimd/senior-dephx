@@ -83,7 +83,7 @@ func run() error {
 	// it, and they must be the same queue: construct it inline at each use and you
 	// have written two, which is the ownership rule below broken in the one place
 	// nobody looks, because both lines read correctly on their own.
-	jobs := order.NewQueue(db)
+	jobs := worker.NewPgQueue(db, log)
 
 	userSvc := user.NewService(users, log)
 	orderSvc := order.NewService(db, orders, users, mail, jobs, log)

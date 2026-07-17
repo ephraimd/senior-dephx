@@ -365,7 +365,7 @@ type Service struct {
 	store *Store
 	users *user.Store
 	mail  *mailer.Client
-	jobs  *Queue
+	jobs  *worker.PgQueue
 	log   *slog.Logger
 }
 
@@ -374,7 +374,7 @@ func NewService(
 	store *Store,
 	users *user.Store,
 	mail *mailer.Client,
-	jobs *Queue,
+	jobs *worker.PgQueue,
 	log *slog.Logger,
 ) *Service {
 	return &Service{db: db, store: store, users: users, mail: mail, jobs: jobs, log: log}

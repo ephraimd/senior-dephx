@@ -266,12 +266,34 @@ type Message struct {
 	Payload []byte
 	Attempt int
 }
+
+// Queue is what a consumer needs and nothing more: the worker package declares the
+// interface it consumes, so a second implementation is a new file rather than an edit
+// to this one.
+//
+// Enqueue is deliberately absent. It takes a transaction, and a consumer has no
+// transaction to give it - so putting it here would force every implementation to
+// answer a question only producers ask, and force the consumer's tests to stub a
+// method they never call.
+type Queue interface {
+	Claim(ctx context.Context, n int) ([]Message, error)
+	Ack(ctx context.Context, id int64) error
+	Retry(ctx context.Context, id int64, runAfter time.Time) error
+	DeadLetter(ctx context.Context, id int64, cause string) error
+}
+
+// Payload is what a producer enqueues: anything that can name itself and survive
+// being JSON. Key is the only method because the unique index is the only thing the
+// queue needs from the job it is storing.
+type Payload interface {
+	Key() string
+}
 ```
 
 ## Start after commit, snapshot by value, always bounded
 
 ```go
-// ✘ The job is started inside the transaction.
+// ✘ The job is enqueued inside the transaction, by a queue that cannot join it.
 func (s *Service) Create(ctx context.Context, in CreateOrder) (*Order, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -297,6 +319,19 @@ func (s *Service) Create(ctx context.Context, in CreateOrder) (*Order, error) {
 	return order, nil
 }
 ```
+
+That line does not compile against the `Enqueue` this file declares, which demands the
+`*sql.Tx`. That is the point, and it is worth being precise about why the shape exists
+at all: a context and a payload, with no transaction, is exactly the signature you get
+from a broker client, because a broker has no transaction to be given. So the bug is
+not something a careless person types. It is the only thing that queue's API lets them
+type, and the three outcomes above are what they get for using it.
+
+Which is the argument for putting the queue in the same database as the rows it talks
+about. A queue that can take your transaction can be made to demand it, and then the
+compiler enforces the ordering on every call site, forever. A queue that cannot take
+one leaves you enforcing it by review, on a race that reproduces about a third of the
+time.
 
 There are exactly two correct shapes.
 
@@ -474,6 +509,84 @@ create unique index jobs_key_active on jobs (key)
 create index jobs_claimable on jobs (run_after) where state = 'pending';
 ```
 
+### That table is the queue
+
+`PgQueue` is the only implementation of `Queue`, and it is nothing but the writes that
+move a row between the states the schema just declared. There is no queue object with
+a life of its own: the table holds the jobs, and this type is the only code allowed to
+say so.
+
+```go
+// internal/worker/pgqueue.go
+
+type PgQueue struct {
+	db  *sql.DB
+	log *slog.Logger
+}
+
+func NewPgQueue(db *sql.DB, log *slog.Logger) *PgQueue {
+	return &PgQueue{db: db, log: log.With("queue", "jobs")}
+}
+
+// The tx is required, not optional. A job that can be enqueued without one can be
+// enqueued before the row it describes exists, and that bug is a race you re-roll on
+// every request. Demanding the tx here is how the compiler refuses to write it.
+func (q *PgQueue) Enqueue(ctx context.Context, tx *sql.Tx, p Payload) error {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", p.Key(), err)
+	}
+	// do nothing, not an error: jobs_key_active is the dedupe, and the second enqueue
+	// of the same work is a success. It means the work is queued, which is what the
+	// caller asked for. Erroring here turns every double-clicked button into a 500.
+	const stmt = `
+		insert into jobs (key, payload)
+		     values ($1, $2)
+		on conflict do nothing`
+	if _, err := tx.ExecContext(ctx, stmt, p.Key(), b); err != nil {
+		return fmt.Errorf("enqueue %s: %w", p.Key(), err)
+	}
+	return nil
+}
+
+// Ack ends the job. The row is kept, out of the partial unique index, so the same key
+// can legitimately be enqueued again tomorrow.
+func (q *PgQueue) Ack(ctx context.Context, id int64) error {
+	const stmt = `update jobs set state = 'done', claimed_at = null where id = $1`
+	if _, err := q.db.ExecContext(ctx, stmt, id); err != nil {
+		return fmt.Errorf("ack job %d: %w", id, err)
+	}
+	return nil
+}
+
+// Retry hands the row back with a time on it. The backoff is a value in run_after,
+// which the claim's index already reads - not a sleeping goroutine holding a slot for
+// four minutes to achieve the same delay at the cost of a worker.
+func (q *PgQueue) Retry(ctx context.Context, id int64, runAfter time.Time) error {
+	const stmt = `
+		update jobs
+		   set state = 'pending', run_after = $2, claimed_at = null
+		 where id = $1`
+	if _, err := q.db.ExecContext(ctx, stmt, id, runAfter); err != nil {
+		return fmt.Errorf("retry job %d: %w", id, err)
+	}
+	return nil
+}
+
+// DeadLetter keeps the row, the payload and the cause. The person who opens this
+// table at 3am has nothing else to go on, and "it failed" is not a finding.
+func (q *PgQueue) DeadLetter(ctx context.Context, id int64, cause string) error {
+	const stmt = `
+		update jobs
+		   set state = 'dead', last_error = $2, claimed_at = null
+		 where id = $1`
+	if _, err := q.db.ExecContext(ctx, stmt, id, cause); err != nil {
+		return fmt.Errorf("dead-letter job %d: %w", id, err)
+	}
+	return nil
+}
+```
+
 ## Every retry needs a bound and a terminus
 
 ```go
@@ -627,7 +740,7 @@ func (q *PgQueue) ReclaimStale(ctx context.Context) error {
 Wired in the root exactly like the rest, which is the payoff for having one shape:
 
 ```go
-reclaimer := worker.New("job-reclaimer", 2*time.Minute, log, queue.ReclaimStale)
+reclaimer := worker.New("job-reclaimer", 2*time.Minute, log, jobs.ReclaimStale)
 reclaimer.Start(ctx)
 defer reclaimer.Stop(cfg.ShutdownTimeout)
 ```
