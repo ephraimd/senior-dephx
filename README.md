@@ -114,13 +114,61 @@ boundary, and by running the thing instead of trusting that it built.
 |---|---|
 | **`software-engineer-intuition`** | Before anything non-trivial. The gate: calibrate blast radius → research prior art → trace side effects → name the pattern → post a Change Brief → ask on the forks. |
 | **`engineering-standards`** | Writing or reviewing code. Contract programming, fitting the existing structure, isolating vendors, typed errors, idempotency, snapshot-at-write, and not writing AI-looking code. |
+| **`backend-shape`** | Designing or bootstrapping a backend, adding a feature, deciding where code goes. Composition readable in one place, organise by feature not layer, typed boundaries, config read once. In an existing codebase **that codebase's shape wins** — this fires only when the choice is genuinely yours. |
 | **`ui-craft`** | Any UI work. De-slopping, primitive reuse, density above the fold, mobile-first, accent consistency, self-documenting controls. |
 | **`verify-for-real`** | Before claiming anything works. A build is not a verification. |
 | **`git-discipline`** | Before the first `git add`. Explicit-path staging, branch flow, history safety, attribution. |
+| **`go-backend-blueprint`** | **Explicit invocation only — never on the agent's own initiative.** One person's house style for a Go backend, greenfield or full refactor. [See below](#blueprints). |
 
 Plus a **gate** that stays resident, so the thinking applies without anyone remembering to
 ask for it. The full procedure loads only when the work is big enough to need it — a typo
 fix gets none of this, because process on a typo is its own kind of slop.
+
+## Blueprints
+
+Every other skill here is universal: it holds in any stack, and the agent learns your
+project's vocabulary by reading your repo. **A blueprint is the one thing that isn't.**
+
+`go-backend-blueprint` is one person's opinionated house style for a Go backend — concrete
+enough to build a service from, down to the library choices. Composition and lifecycle,
+background workers, the HTTP layer and its single response envelope, the data layer, and
+inter-service contracts: roughly 5,500 lines across an index and five reference files, read
+one at a time as you reach that layer.
+
+It has **two modes and no third**: *greenfield* (build a new service to this standard) and
+*full refactor* (bring an existing one to it). "Apply a bit of it while I'm in here" leaves
+a service wearing two shapes, which is worse than either alone — now every reader has to
+work out which half they're standing in.
+
+### Why it loads only when you ask for it by name
+
+This is the part worth being honest about. Every other skill here is defensible to a
+stranger: reuse your primitives, verify before claiming done, don't put a storage type on
+the wire. Those are arguments you can win. **A blueprint is taste.** Another Go shop could
+reject every line of it and still be building the right thing. What it offers isn't
+correctness, it's coherence — one set of answers that fit each other.
+
+So auto-loading it would do the exact thing `backend-shape` and `engineering-standards`
+exist to prevent: impose one person's house style on a repo whose own shape wins. It would
+violate the plugin's own doctrine on the way in, which is the worst failure available here —
+worse than any bug the standard prevents, because it costs the trust that lets any of these
+skills run at all.
+
+Gating it resolves that, and the resolution is the authority ladder: **human > project >
+plugin.** "Fit what's there" is the right default *precisely because nobody asked*.
+**Invoking the blueprint by name is the human asking** — and that's what authorises it to
+override the deference every other skill obeys. Unasked, there's no human in that ladder at
+all; there's only a plugin quietly rewriting someone's service to a stranger's taste.
+
+Ask for it by name, literally:
+
+> *"Use the go-backend-blueprint to build this service."*
+> *"Refactor this service to the go-backend-blueprint."*
+
+`test/smoke.sh` holds the gate to the extent a test can: an ungated blueprint — one whose
+description doesn't say it loads only on request — fails the suite. That checks the rule is
+stated, not that a model obeys it. Same limit as everything else here (see above), and the
+reason the rule is stated where the model actually reads it.
 
 ## What it does not do
 
@@ -211,16 +259,45 @@ Keep it sharp. "Reuse your primitives" is advice. "Reused twice → extract it, 
 'primary' style is a bug to report" is a standard. Only one of those changes what an agent
 does.
 
+### Adding a blueprint
+
+More languages are intended. A blueprint is the one place this plugin relaxes its own design
+rule, so what it must satisfy is narrow and non-negotiable. `test/smoke.sh` enforces all four
+— a blueprint that breaks any of them turns the suite red rather than shipping quietly.
+
+- **It lives at `skills/<lang>-backend-blueprint/`.** Skill discovery is a flat glob over
+  `skills/*/`, so a tidier-looking `skills/stacks/<lang>/` is never found: the glob matches
+  the `stacks` folder, not the blueprint inside it. The skill is loaded nowhere and advertised
+  to Codex nowhere.
+- **Its description gates it inside the first 150 characters.** The Codex block renders every
+  description cut at exactly 150 chars (`${desc:0:150}…`), because `AGENTS.md` is Codex's
+  whole extension surface and it can't load by description. A gate clause after that point
+  isn't merely missed — Codex advertises the blueprint with its gate sliced off, which is
+  worse than not shipping it.
+- **Its description states the do-not-autoload rule** — not just when to use it, but that it
+  must never load for general work in that language, for another language, or on the agent's
+  own initiative.
+- **It may name its language and its libraries. It may never name a company, product, repo,
+  or host.** The first half is the exemption that makes a blueprint possible: it can't be
+  concrete without naming things. The second half is where the exemption stops. A house style
+  arriving with an employer's nouns in it is just someone else's codebase in your repo — the
+  slop the design rule above exists to keep out, wearing a better suit.
+
 ## Layout
 
 ```
 core/GATE.md                      one gate, three consumers
 core/SUPERPOWERS.md               the deference map, emitted only when superpowers is there
 skills/*/SKILL.md                 the doctrine
+skills/*-backend-blueprint/
+  references/                     the concrete patterns, one file per layer, read on demand
 hooks/                            Claude Code SessionStart injection
 .opencode/plugins/                OpenCode: skills path + gate injection
 codex/                            why Codex is different
 install.sh                        wires all three
+test/smoke.sh                     the design rules, executable: the blueprint gate, the
+                                  no-nouns rule, all three install paths, and proof the
+                                  installer never damages a file it doesn't own
 ```
 
 Three copies of the same judgment would drift — the exact failure this exists to end. So

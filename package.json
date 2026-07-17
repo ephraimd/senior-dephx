@@ -1,6 +1,6 @@
 {
   "name": "senior-dephx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, ask on the real decisions, and verify before claiming done",
   "type": "module",
   "main": ".opencode/plugins/senior-dephx.js",
