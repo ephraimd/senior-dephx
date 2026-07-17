@@ -166,6 +166,144 @@ for d in "$ROOT"/skills/*-backend-blueprint/; do
   fi
 done
 
+echo "== the codex installer never damages a file it does not own =="
+# install_codex is the ONLY installer path that writes to a file the user owns; the other
+# two print instructions and touch nothing. So it is the only place install.sh can destroy
+# work, and its promise -- replace our own block, disturb nothing else -- was untested.
+# A second block on re-run, or a swallowed paragraph of someone's own notes, is the worst
+# bug this repo could ship: it lands on a file the plugin does not own, via the one command
+# users are invited to re-run on every upgrade.
+codex_tmp="$(mktemp -d)"
+# A trap, not a trailing `rm`: unlike the sibling-plugin check above, this block fails in
+# the middle sometimes, and a failing assertion must not litter /tmp with AGENTS.md files.
+trap 'rm -rf "$codex_tmp"' EXIT
+
+# The markers are a wire format, not an implementation detail: they are already sitting in
+# every file the installer has ever touched. Hardcode them rather than sourcing install.sh
+# -- if someone edits them, the next install appends a SECOND block to every existing file
+# instead of replacing, and this check going red is exactly the alarm that deserves.
+CODEX_BEGIN='<!-- BEGIN senior-dephx -->'
+CODEX_END='<!-- END senior-dephx -->'
+CODEX_ANCHOR='# How I work'          # rendered inside the block, so it tracks the block
+CODEX_CORRUPT='# CORRUPTED BY A HUMAN EDIT'
+
+# Run the REAL installer as a subprocess. Never source it, never re-implement its awk here:
+# a test that reimplements the code under test only ever proves the copy agrees with itself.
+#   - cd inside a subshell, so the suite's own cwd survives.
+#   - --here targets ./AGENTS.md, so $HOME is never consulted on this path. HOME is pointed
+#     into the temp dir ANYWAY, belt and braces: the no-arg path does `mkdir -p $HOME/.codex`
+#     and writes there, so if arg parsing ever shifts (or `${2:-}` stops seeing --here), the
+#     blast radius is a stray file inside the dir we delete -- never the real ~/.codex.
+codex_install() {
+  local rc=0
+  ( cd "$codex_tmp" && HOME="$codex_tmp/fake-home" bash "$ROOT/install.sh" --codex --here ) >/dev/null 2>&1 || rc=$?
+  return "$rc"
+}
+
+# Occurrences, not `grep -c`, which counts matching LINES: two markers landing on one line
+# would read as a clean "1" and the duplicate-block check would pass while broken.
+# `wc -l` pads its output on BSD, hence the tr.
+count_str() { grep -oF "$1" "$2" | wc -l | tr -d '[:space:]'; }
+
+# Byte-for-byte, not `grep 'is my line still there'`: the promise is that the user's bytes
+# are untouched, and grep would nod along at a file that lost a blank line or gained an
+# indent. install_codex only ever appends or splices its own block, so the seed stays a
+# literal byte prefix and the trailing notes a literal byte suffix, across every run.
+# `wc -c` pads on BSD and GNU head rejects a padded count, so strip before use.
+byte_count() { wc -c < "$1" | tr -d '[:space:]'; }
+prefix_is() { head -c "$(byte_count "$2")" "$1" | cmp -s - "$2"; }   # FILE EXPECTED
+suffix_is() { tail -c "$(byte_count "$2")" "$1" | cmp -s - "$2"; }   # FILE EXPECTED
+
+# Deliberately awkward bytes. `&` is sed's "the whole match" character and `\1` is a
+# backreference: an implementation that reached for s/// instead of awk would corrupt these
+# lines while every "did the block get written" check stayed green.
+cat > "$codex_tmp/seed.md" <<'SEED'
+# My own AGENTS.md
+
+Notes the plugin does not own, with bytes chosen to hurt: a `backtick`, a $DOLLAR,
+a "quote", a 'squote', a back\slash, an & ampersand, and a \1 backreference.
+
+<!-- BEGIN my-own-thing -->
+A marker-shaped comment that is NOT ours. It must survive untouched.
+<!-- END my-own-thing -->
+SEED
+
+# Trailing content is exactly where a naive range-delete corrupts a file: delete-from-BEGIN-
+# to-EOF is indistinguishable from delete-from-BEGIN-to-END until someone writes a line down
+# here. It is also the case a hand-test skips, because a human appends their notes ABOVE the
+# block, where they are already safe.
+cat > "$codex_tmp/after.md" <<'AFTER'
+
+## Notes I keep BELOW the plugin block
+
+If a range-delete ran to EOF instead of to the END marker, this paragraph is what
+disappears -- silently, on an upgrade, in a file the plugin does not own.
+AFTER
+
+cp "$codex_tmp/seed.md" "$codex_tmp/AGENTS.md"
+
+# A fixture that came out empty would make every byte-for-byte check below pass while
+# proving nothing: byte_count returns 0, `head -c 0` emits nothing, and cmp of two empty
+# streams is "equal". BSD head additionally errors on -c 0 -- and that error is swallowed,
+# so the vacuous pass is indistinguishable from a real one; GNU head accepts -c 0 and goes
+# vacuous with no hint at all. This suite has already been bitten once by a check that
+# looked right and could never fire. Assert the fixtures exist before trusting them.
+if [ -s "$codex_tmp/seed.md" ] && [ -s "$codex_tmp/after.md" ]; then
+  pass "fixtures: seed and trailing notes are non-empty"
+else
+  fail "fixtures: a heredoc came out empty — every byte-for-byte check below is vacuous"
+fi
+
+# 1. Fresh install into a file that already has the user's own content.
+codex_rc=0; codex_install || codex_rc=$?
+if [ "$codex_rc" -eq 0 ]; then pass "fresh: installer exits 0"; else fail "fresh: installer exited $codex_rc"; fi
+nbegin="$(count_str "$CODEX_BEGIN" "$codex_tmp/AGENTS.md")"; nend="$(count_str "$CODEX_END" "$codex_tmp/AGENTS.md")"
+if [ "$nbegin" = "1" ] && [ "$nend" = "1" ]; then pass "fresh: exactly one block written"; else fail "fresh: expected 1 BEGIN/1 END, got $nbegin/$nend"; fi
+if [ "$(count_str "$CODEX_ANCHOR" "$codex_tmp/AGENTS.md")" = "1" ]; then pass "fresh: block carries the rendered doctrine"; else fail "fresh: block missing '$CODEX_ANCHOR'"; fi
+if prefix_is "$codex_tmp/AGENTS.md" "$codex_tmp/seed.md"; then pass "fresh: pre-existing content survives byte for byte"; else fail "fresh: pre-existing content was altered"; fi
+
+# Now the user adds notes BELOW our block, and only then do we re-run.
+cat "$codex_tmp/after.md" >> "$codex_tmp/AGENTS.md"
+
+# 2. Re-run is idempotent. The assertion that matters most: an installer that appends a
+#    second block on every upgrade grows the file without bound and double-loads the gate.
+codex_rc=0; codex_install || codex_rc=$?
+if [ "$codex_rc" -eq 0 ]; then pass "re-run: installer exits 0"; else fail "re-run: installer exited $codex_rc"; fi
+nbegin="$(count_str "$CODEX_BEGIN" "$codex_tmp/AGENTS.md")"; nend="$(count_str "$CODEX_END" "$codex_tmp/AGENTS.md")"
+if [ "$nbegin" = "1" ] && [ "$nend" = "1" ]; then pass "re-run: still exactly one block (no duplicate appended)"; else fail "re-run: expected 1 BEGIN/1 END, got $nbegin/$nend"; fi
+if [ "$(count_str "$CODEX_ANCHOR" "$codex_tmp/AGENTS.md")" = "1" ]; then pass "re-run: doctrine present exactly once"; else fail "re-run: '$CODEX_ANCHOR' appears $(count_str "$CODEX_ANCHOR" "$codex_tmp/AGENTS.md") times"; fi
+if prefix_is "$codex_tmp/AGENTS.md" "$codex_tmp/seed.md"; then pass "re-run: content above the block survives byte for byte"; else fail "re-run: content above the block was altered"; fi
+if suffix_is "$codex_tmp/AGENTS.md" "$codex_tmp/after.md"; then pass "re-run: content BELOW the END marker survives byte for byte"; else fail "re-run: content below the END marker was corrupted"; fi
+
+# 3. Upgrade replaces the block's contents rather than duplicating them. Mutate a line
+#    INSIDE the markers -- the shape of a stale block from an older version.
+# Whole-line equality against the anchor constant, not sub(/literal/): a second copy of the
+# anchor would drift from CODEX_ANCHOR, and sub()'s replacement expands `&` to the match.
+# If the anchor ever stops matching, the guard below fires rather than passing vacuously.
+awk -v a="$CODEX_ANCHOR" -v c="$CODEX_CORRUPT" '$0==a {$0=c} {print}' "$codex_tmp/AGENTS.md" > "$codex_tmp/mutated" \
+  && mv "$codex_tmp/mutated" "$codex_tmp/AGENTS.md"
+if [ "$(count_str "$CODEX_CORRUPT" "$codex_tmp/AGENTS.md")" = "1" ]; then
+  pass "upgrade: setup mutated a line inside the markers"
+else
+  fail "upgrade: setup failed to mutate inside the markers — the next checks prove nothing"
+fi
+codex_rc=0; codex_install || codex_rc=$?
+if [ "$codex_rc" -eq 0 ]; then pass "upgrade: installer exits 0"; else fail "upgrade: installer exited $codex_rc"; fi
+if [ "$(count_str "$CODEX_CORRUPT" "$codex_tmp/AGENTS.md")" = "0" ]; then pass "upgrade: stale block content is gone"; else fail "upgrade: stale block content survived the re-render"; fi
+if [ "$(count_str "$CODEX_ANCHOR" "$codex_tmp/AGENTS.md")" = "1" ]; then pass "upgrade: fresh doctrine restored, exactly once"; else fail "upgrade: '$CODEX_ANCHOR' appears $(count_str "$CODEX_ANCHOR" "$codex_tmp/AGENTS.md") times"; fi
+nbegin="$(count_str "$CODEX_BEGIN" "$codex_tmp/AGENTS.md")"; nend="$(count_str "$CODEX_END" "$codex_tmp/AGENTS.md")"
+if [ "$nbegin" = "1" ] && [ "$nend" = "1" ]; then pass "upgrade: replaced, not duplicated"; else fail "upgrade: expected 1 BEGIN/1 END, got $nbegin/$nend"; fi
+if prefix_is "$codex_tmp/AGENTS.md" "$codex_tmp/seed.md"; then pass "upgrade: content above the block survives byte for byte"; else fail "upgrade: content above the block was altered"; fi
+if suffix_is "$codex_tmp/AGENTS.md" "$codex_tmp/after.md"; then pass "upgrade: content BELOW the END marker survives byte for byte"; else fail "upgrade: content below the END marker was corrupted"; fi
+
+# The real ~/.codex is what this suite must never touch. --here plus the HOME override make
+# that impossible; assert it rather than trust it. Proven by mutation: an installer patched
+# to ignore --here lands in the temp fake-home and turns this line red, with the user's own
+# ~/.codex untouched.
+if [ ! -e "$codex_tmp/fake-home" ]; then pass "installer never reached for \$HOME"; else fail "installer wrote under \$HOME — the --here path is consulting it"; fi
+
+rm -rf "$codex_tmp"; trap - EXIT
+
 echo
 [ "$FAIL" -eq 0 ] && echo "smoke: PASS" || echo "smoke: FAIL"
 exit "$FAIL"
