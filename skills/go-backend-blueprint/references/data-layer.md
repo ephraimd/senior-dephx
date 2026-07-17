@@ -365,6 +365,7 @@ type Service struct {
 	store *Store
 	users *user.Store
 	mail  *mailer.Client
+	jobs  *Queue
 	log   *slog.Logger
 }
 
@@ -373,9 +374,10 @@ func NewService(
 	store *Store,
 	users *user.Store,
 	mail *mailer.Client,
+	jobs *Queue,
 	log *slog.Logger,
 ) *Service {
-	return &Service{db: db, store: store, users: users, mail: mail, log: log}
+	return &Service{db: db, store: store, users: users, mail: mail, jobs: jobs, log: log}
 }
 
 // tx begins, defers rollback, runs fn, commits. It is four moves and it is the only

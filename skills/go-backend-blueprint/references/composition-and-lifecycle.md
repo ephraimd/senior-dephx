@@ -79,8 +79,14 @@ func run() error {
 	users := user.NewStore(db)
 	orders := order.NewStore(db)
 
+	// One queue, named once. The service enqueues onto it and the consumer drains
+	// it, and they must be the same queue: construct it inline at each use and you
+	// have written two, which is the ownership rule below broken in the one place
+	// nobody looks, because both lines read correctly on their own.
+	jobs := order.NewQueue(db)
+
 	userSvc := user.NewService(users, log)
-	orderSvc := order.NewService(db, orders, users, mail, log)
+	orderSvc := order.NewService(db, orders, users, mail, jobs, log)
 
 	// Workers are owned by run, never by a service and never by a handler.
 	// See references/background-work.md for the Worker shape; run only needs to
@@ -89,7 +95,7 @@ func run() error {
 	reaper.Start(ctx)
 	defer reaper.Stop(cfg.ShutdownTimeout)
 
-	receipts := worker.NewConsumer("receipts", order.NewQueue(db), orderSvc.SendReceipt, log)
+	receipts := worker.NewConsumer("receipts", jobs, orderSvc.SendReceipt, log)
 	receipts.Start(ctx)
 	defer receipts.Stop(cfg.ShutdownTimeout)
 
@@ -141,6 +147,7 @@ type Config struct {
 	LogLevel        slog.Level
 	DatabaseURL     string
 	MaxDBConns      int
+	AuthSecret      string
 	MailerURL       string
 	MailerToken     string
 	ReaperInterval  time.Duration
@@ -158,6 +165,7 @@ func Load() Config {
 		LogLevel:        levelOr("LOG_LEVEL", slog.LevelInfo),
 		DatabaseURL:     mustEnv("DATABASE_URL"),
 		MaxDBConns:      intOr("MAX_DB_CONNS", 20),
+		AuthSecret:      mustEnv("AUTH_SECRET"),
 		MailerURL:       mustEnv("MAILER_URL"),
 		MailerToken:     mustEnv("MAILER_TOKEN"),
 		ReaperInterval:  durOr("REAPER_INTERVAL", time.Minute),
