@@ -171,25 +171,31 @@ git commit -m "test: nouns check — the design rule, executable"
 
 **Files:** Modify `test/smoke.sh`
 
-- [ ] **Step 1: Append the check**
+- [ ] **Step 1: Extract `skill_desc()` first, then append the check**
 
-```bash
-echo "== blueprints load ONLY on explicit request =="
-# install.sh truncates descriptions to 150 chars for the Codex block, so the gate clause
-# must survive truncation — otherwise Codex advertises the blueprint without its gate.
-for d in "$ROOT"/skills/*-backend-blueprint/; do
-  [ -d "$d" ] || continue
-  n="$(basename "$d")"
-  desc="$(awk -F': *' '/^description:/{print substr($0, index($0,$2)); exit}' "$d/SKILL.md")"
-  head150="$(printf '%s' "$desc" | cut -c1-150)"
-  printf '%s' "$head150" | grep -qiE "only|explicit" \
-    && pass "$n gated within the first 150 chars" \
-    || fail "$n: gate clause missing from the first 150 chars of description (Codex truncates there)"
-  printf '%s' "$desc" | grep -qiE "do not (load|use) .*(general|other)" \
-    && pass "$n states the do-not-autoload rule" \
-    || fail "$n: description must say it must NOT load for general work in the language"
-done
-```
+**SHIPPED — see `test/smoke.sh` for the authoritative version.** Not copied here: two copies
+of a check drift.
+
+Description-extraction is needed in three places, so it is a shell function
+(`skill_desc`) — *"reused twice → extract it"*, applied to this repo's own test.
+
+**The first draft of this step had four defects. All four are instructive:**
+1. **`grep -qiE "only|explicit"` had no word boundary** — `only` matches inside
+   **"c*only*"**… i.e. *"covers **commonly** used patterns"* would be certified as **gated**.
+   That is a **false PASS on the gate**, which ships the catastrophe. It is the same
+   substring bug the nouns check documents, reintroduced one section later.
+2. **Two words are not a gate.** A lone "only" proves nothing (*"covering only composition"*).
+   The shipped check requires the **restriction and the request it's conditioned on in the
+   same sentence** — deliberately *tighter*: a false FAIL just makes the author reword; a
+   false PASS imposes a house style on a stranger.
+3. **`&& pass || fail` falls through.** If `pass`'s printf fails (stdout closed, e.g.
+   `smoke.sh | head -1`), the `||` branch fires **too** — printing both `ok` and `FAIL` and
+   turning a clean repo red. Use `if/else`.
+4. **`cut -c1-150` didn't model `install.sh`**, which truncates with `${desc:0:150}` (`cut -c`
+   counts bytes on some platforms, characters on others). Mirror the code you are testing.
+
+**Rule this establishes:** on a gate, bias to false-FAIL. A false fail costs a reword; a
+false pass costs the thing the gate exists to prevent.
 
 - [ ] **Step 2: Run — passes vacuously (no blueprints yet), which is correct**
 
