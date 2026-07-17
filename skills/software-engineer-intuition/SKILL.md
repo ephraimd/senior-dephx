@@ -91,7 +91,8 @@ If the brief is boring, the change is safe. If writing it surfaces a fork, stop 
 
 Ask with **informed options**: researched, each with a consequence, and a recommendation.
 Never a blank "what do you want?", and never ask what a grep can answer. One consolidated
-round beats a drip of questions.
+round for **independent** forks; one at a time only when answers are **dependent** (a
+design tree). Never a drip of independent questions.
 
 ## Step 5 - Route, do not duplicate
 

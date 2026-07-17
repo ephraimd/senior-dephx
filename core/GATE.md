@@ -44,7 +44,9 @@ judgment call, and anything with a real trade-off (fairness, money, irreversibil
 
 Ask with **informed options** - researched, each with its consequence, and a
 recommendation. Never a blank "what do you want?". Never ask what a grep can answer. One
-consolidated round, not a drip.
+consolidated round for **independent** forks - never a drip. Ask one at a time only when
+the answers are **dependent**: when a later question's content changes based on an earlier
+answer (a design tree). Independence decides the cadence, not politeness.
 
 ## Evidence before assertions
 
