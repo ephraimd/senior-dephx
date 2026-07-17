@@ -395,6 +395,10 @@ func (s *Service) Create(
 	sc domain.Scope,
 	in CreateOrder,
 ) (Order, error) {
+	// createCommitted is the transactional Create from "Start after commit" above:
+	// price, insert, commit, return. It is named separately here only so this
+	// example is about what happens after it, and it returns nothing until the row
+	// is durable.
 	order, err := s.createCommitted(ctx, sc, in)
 	if err != nil {
 		return Order{}, err

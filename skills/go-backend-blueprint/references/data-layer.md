@@ -1055,6 +1055,33 @@ the tiebreak, in the order the query names them. An index that stops at `created
 makes the tiebreak a sort, and the sort is the thing that turns a 25-row page into a
 read of every order the tenant has.
 
+And the type, beside the table it is:
+
+```go
+// internal/order/order.go
+
+// Order is the row. It lives next to the schema because it IS the schema, and the
+// two change in the same commit or one of them is lying.
+//
+// It carries TenantID even though every query already scopes by it, because a row
+// that has travelled - into a job payload, into a cache, into a peer's request -
+// has left the query that scoped it, and a row that cannot say which tenant it
+// belongs to is a row the next reader has to guess about.
+//
+// This type does not go on the wire. references/http-layer.md maps it to a response
+// DTO by hand, because the day someone adds a cost_cents column here is not the day
+// customers should start seeing margins.
+type Order struct {
+	TenantID   int64
+	ID         int64
+	CustomerID int64
+	TotalCents int64
+	Status     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+```
+
 ## Checklist
 
 A data-layer change is done when all of these are true. Any "no" is the bug you ship.
