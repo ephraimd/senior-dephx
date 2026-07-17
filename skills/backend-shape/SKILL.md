@@ -14,7 +14,7 @@ and what that arrangement is obliged to make visible.
 **The composition is readable in one place.** One root module, one configuration
 entrypoint, one composition function - open it and see what the application is made of:
 what it depends on, what it exposes, what it reaches out to. **A dependency-injection
-container is fine. Wiring you have to search for is not.**
+container is fine. Wiring you have to grep for is not.**
 
 This is not an argument against frameworks, containers, decorators, generated code, or any
 other machinery. Declare your dependencies however the project's tooling wants them
