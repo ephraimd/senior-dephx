@@ -114,7 +114,14 @@ all five up front.
 | `references/data-layer.md` | Queries, transactions, the panic boundary, migrations, connection pooling |
 | `references/inter-service.md` | Calling another service or a vendor: contracts, typed clients, tenancy passthrough, vendor boundaries |
 
-**These files do not exist yet** - later work writes them. The table is the contract they
-must satisfy: those paths, those subjects, nothing quietly relocated or merged. An index
-that drifts from its references is a lie told to whoever trusted it, and one wrong entry
-retires the whole table.
+The table is the contract those files satisfy: those paths, those subjects, nothing
+quietly relocated or merged. An index that drifts from its references is a lie told to
+whoever trusted it, and one wrong entry retires the whole table. If you move a file or
+fold one subject into another, this table changes in the same commit or it is already
+wrong.
+
+They are written to be built from, not cited. Every helper the standard names is defined
+in one of them, so a fresh repository can be constructed from these five and nothing else.
+Where one references another's work - the response envelope, the transaction helper, the
+queue - it names the file that owns it rather than restating it, because the restatement
+is the copy that drifts.
