@@ -138,6 +138,28 @@ opened. Otherwise it uses its own.** `Insert` takes one, because the order row a
 its outbox row are one fact. `ExpireOlderThan` does not, because it is the entire
 unit by itself and nothing else belongs in it.
 
+It takes the scope on the same terms as `Find` and `Cancel`, and for the same reason:
+a write into the wrong tenant is the read leak with a longer half-life.
+
+```go
+// internal/order/store.go
+
+func (s *Store) Insert(
+	ctx context.Context,
+	db dbx.DB,
+	sc domain.Scope,
+	in CreateOrder,
+) (Order, error) {
+	if err := sc.Validate(); err != nil {
+		return Order{}, err
+	}
+	// insert into orders (tenant_id, ...) values ($1, ...) returning ...
+	// tenant_id is sc.TenantID, the statement is inside SafeDBQuery, and the handle
+	// is db - the one the caller opened, not one this method went and found.
+	...
+}
+```
+
 ## `SafeDBQuery`: a panic becomes an error
 
 Every query in this service goes through it. It runs the call, converts the driver's
@@ -418,11 +440,15 @@ func (s *Service) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 Used, with the store taking the handle it was given:
 
 ```go
-func (s *Service) Create(ctx context.Context, in CreateOrder) (Order, error) {
+func (s *Service) Create(
+	ctx context.Context,
+	sc domain.Scope,
+	in CreateOrder,
+) (Order, error) {
 	var out Order
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		out, err = s.store.Insert(ctx, tx, in)
+		out, err = s.store.Insert(ctx, tx, sc, in)
 		return err
 	})
 	if err != nil {
@@ -445,11 +471,18 @@ same time, and one of the two would get used.
 ```go
 // ✘
 err := s.tx(ctx, func(tx *sql.Tx) error {
-	out, err := s.store.Insert(ctx, tx, in)
+	out, err := s.store.Insert(ctx, tx, sc, in)
 	if err != nil {
 		return err
 	}
-	return s.mail.SendReceipt(ctx, out) // 10s timeout, someone else's uptime
+	// Typed and scoped, because out is the storage model: hand that to a peer and you
+	// have published every column anyone adds to Order later. The mailer's own
+	// ReceiptRequest is what stops it (references/composition-and-lifecycle.md).
+	return s.mail.SendReceipt(ctx, sc, mailer.ReceiptRequest{ // 10s, someone else's
+		OrderID:    out.ID,
+		CustomerID: out.CustomerID,
+		TotalCents: out.TotalCents,
+	})
 })
 ```
 

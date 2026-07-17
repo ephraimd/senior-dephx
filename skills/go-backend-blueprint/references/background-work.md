@@ -294,14 +294,18 @@ type Payload interface {
 
 ```go
 // ✘ The job is enqueued inside the transaction, by a queue that cannot join it.
-func (s *Service) Create(ctx context.Context, in CreateOrder) (*Order, error) {
+func (s *Service) Create(
+	ctx context.Context,
+	sc domain.Scope,
+	in CreateOrder,
+) (*Order, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	order, err := s.store.Insert(ctx, tx, in)
+	order, err := s.store.Insert(ctx, tx, sc, in)
 	if err != nil {
 		return nil, err
 	}
@@ -342,16 +346,21 @@ before commit:
 
 ```go
 // ✔ Same database, one transaction, one atomic fact.
-func (s *Service) Create(ctx context.Context, in CreateOrder) (*Order, error) {
+func (s *Service) Create(
+	ctx context.Context,
+	sc domain.Scope,
+	in CreateOrder,
+) (*Order, error) {
 	var order *Order
 
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		order, err = s.store.Insert(ctx, tx, in)
+		order, err = s.store.Insert(ctx, tx, sc, in)
 		if err != nil {
 			return err
 		}
 		return s.jobs.Enqueue(ctx, tx, ReceiptJob{
+			TenantID:   sc.TenantID,      // the only copy the worker will ever get
 			OrderID:    order.ID,         // ids and scalars, by value
 			CustomerID: order.CustomerID,
 			TotalCents: order.TotalCents,
@@ -369,12 +378,21 @@ cannot be a row: a cache invalidation, a metric.
 
 ```go
 // ✔ Commit first. The snapshot is taken before the goroutine exists.
-func (s *Service) Create(ctx context.Context, in CreateOrder) (*Order, error) {
-	order, err := s.createCommitted(ctx, in)
+func (s *Service) Create(
+	ctx context.Context,
+	sc domain.Scope,
+	in CreateOrder,
+) (*Order, error) {
+	order, err := s.createCommitted(ctx, sc, in)
 	if err != nil {
 		return nil, err
 	}
-	s.invalidations.Submit(CacheKey{CustomerID: order.CustomerID}) // a Worker's inbox
+	// The tenant is in the key for the same reason the job carries one: the Worker
+	// reads this off a channel, with no request behind it to ask.
+	s.invalidations.Submit(CacheKey{ // a Worker's inbox
+		TenantID:   sc.TenantID,
+		CustomerID: order.CustomerID,
+	})
 	return order, nil
 }
 ```
@@ -399,11 +417,25 @@ catches if a test happens to do both.
 // ✔ The payload carries the scalars the job needs, or an id it re-reads after
 // commit. Both survive being JSON in a table for a week.
 type ReceiptJob struct {
+	TenantID   int64 `json:"tenant_id"`
 	OrderID    int64 `json:"order_id"`
 	CustomerID int64 `json:"customer_id"`
 	TotalCents int64 `json:"total_cents"`
 }
 ```
+
+### The tenant is in the payload because nothing else can put it there
+
+A request carries its tenant implicitly, in the credential the middleware already
+verified. **A job has no credential and no request.** The async boundary is where
+tenancy dies quietly: the payload is the only thing that survives the enqueue, so a
+tenant that is not written into it is gone - not wrong, gone, and there is nowhere to
+go and look it up. The consumer then cannot call `s.store.Find(ctx, sc, id)` at all,
+because that method demands a `domain.Scope` and there is nothing to build one from.
+
+The worse outcome is the one that compiles: `domain.Scope{}`. `Scope{}.TenantID` is 0,
+which matches no rows - until the backfill that inserts a row with a zero default, at
+which point it matches all of them (`references/data-layer.md`).
 
 ### Always bounded
 
@@ -420,7 +452,21 @@ func (s *Service) SendReceipt(ctx context.Context, m worker.Message) error {
 		// This payload will not parse on attempt 8 either. Terminal, immediately.
 		return fmt.Errorf("%w: unmarshal receipt job: %v", ErrPermanent, err)
 	}
-	return s.mail.SendReceipt(ctx, j.CustomerID, j.OrderID, j.TotalCents)
+
+	// The scope is rebuilt from the payload and checked before anything uses it. A
+	// payload with no tenant will have no tenant on attempt 8 either, so it is
+	// permanent, not retryable - eight sends against a zero scope is eight chances
+	// to touch the wrong rows, spread over nine minutes so the logs never line up.
+	sc := domain.Scope{TenantID: j.TenantID}
+	if err := sc.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrPermanent, err)
+	}
+
+	return s.mail.SendReceipt(ctx, sc, mailer.ReceiptRequest{
+		OrderID:    j.OrderID,
+		CustomerID: j.CustomerID,
+		TotalCents: j.TotalCents,
+	})
 }
 ```
 
@@ -455,6 +501,7 @@ still in the queue. The fix costs a drain.
 ```go
 // ✔ Identity is what the job does. Same work, same key, forever.
 type ReceiptJob struct {
+	TenantID   int64 `json:"tenant_id"`
 	OrderID    int64 `json:"order_id"`
 	CustomerID int64 `json:"customer_id"`
 	TotalCents int64 `json:"total_cents"`
@@ -462,6 +509,11 @@ type ReceiptJob struct {
 
 // Version the key. When the job's MEANING changes, receipt:v2: lets the new job
 // run for orders the v1 job already handled, without touching a single row.
+//
+// TenantID is an input and is deliberately not in the key: orders.id is an identity
+// column, so it is unique across the whole table and already names one order. Put a
+// tenant in the key only where the id it accompanies is unique per tenant rather
+// than per table - then the id alone is two jobs wearing one name.
 func (j ReceiptJob) Key() string {
 	return fmt.Sprintf("receipt:v1:%d", j.OrderID)
 }

@@ -352,6 +352,46 @@ func NewClient(base, token string, timeout time.Duration) *Client {
 }
 
 func (c *Client) Close() { c.tr.CloseIdleConnections() }
+
+// SendReceipt is the only way a receipt leaves this process, and its shape is
+// references/inter-service.md's typed-client rule: a scope, and a request struct of
+// the scalars the peer needs. Never an order.Order - that is this service's storage
+// model, and a storage model on the wire publishes every column anyone adds to it
+// later, to a peer that never asked for any of them.
+type ReceiptRequest struct {
+	OrderID    int64 `json:"order_id"`
+	CustomerID int64 `json:"customer_id"`
+	TotalCents int64 `json:"total_cents"`
+}
+
+// The scope is a parameter and not a field on the request, so the peer reads it from
+// the header this call sets and never has to trust the body for it. client.JSON runs
+// sc.Validate() before it builds anything, so a zero tenant stops here.
+//
+// c.call and peerName belong to this package too; references/inter-service.md declares
+// them, along with the retry and idempotency rules this method is leaning on.
+func (c *Client) SendReceipt(
+	ctx context.Context,
+	sc domain.Scope,
+	r ReceiptRequest,
+) error {
+	_, err := client.JSON[receiptAccepted](ctx, c.call(client.Call{
+		Method: http.MethodPost,
+		Path:   "/v1/receipts",
+		Scope:  sc,
+		Body:   r,
+		// Our stable id for the work. A fresh uuid per attempt is a new fact each
+		// time, and then a retried 504 is a second receipt.
+		IdempotencyKey: strconv.FormatInt(r.OrderID, 10),
+		Retry:          true,
+	}))
+	return err
+}
+
+// The peer's payload contract, not its envelope - client.JSON already unwrapped that.
+type receiptAccepted struct {
+	ReceiptID string `json:"receipt_id"`
+}
 ```
 
 A constructor that fails owns the cleanup of whatever it built before it failed,
