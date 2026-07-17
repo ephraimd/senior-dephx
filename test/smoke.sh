@@ -8,6 +8,12 @@ FAIL=0
 pass() { printf '  ok   %s\n' "$1"; }
 fail() { printf '  FAIL %s\n' "$1"; FAIL=1; }
 
+# The one way this suite reads a description — three checks need it, so it is a primitive,
+# not a copied line. Strips the key and keeps the value verbatim: descriptions contain their
+# own colons, so -F': *' truncates them, and substr($0,index($0,$2)) looks equivalent but
+# returns the WHOLE line when the value is empty, which makes any empty check unfireable.
+skill_desc() { awk '/^description:/{sub(/^description:[[:space:]]*/, ""); print; exit}' "$1"; }
+
 echo "== manifests parse =="
 # Without this guard a missing python3 reports "does not parse" against every manifest —
 # a lie about the file. Blame the missing tool, not the JSON.
@@ -24,10 +30,7 @@ for d in "$ROOT"/skills/*/; do
   s="$d/SKILL.md"; n="$(basename "$d")"
   [ -f "$s" ] || { fail "$n has no SKILL.md"; continue; }
   name="$(awk -F': *' '/^name:/{print $2; exit}' "$s")"
-  # Strip the key, keep the rest verbatim: descriptions contain their own colons, so
-  # splitting on ':' truncates them. (substr($0,index($0,$2)) looks equivalent but returns
-  # the whole line when the value is empty, which makes the empty check unfireable.)
-  desc="$(awk '/^description:/{sub(/^description:[[:space:]]*/, ""); print; exit}' "$s")"
+  desc="$(skill_desc "$s")"
   [ -n "$name" ] || fail "$n: empty name"
   [ -n "$desc" ] || fail "$n: empty description"
   [ -n "$name" ] && [ -n "$desc" ] && pass "$n frontmatter"
@@ -81,6 +84,46 @@ echo "== nouns: NOTHING may name a company/product/repo/host — blueprints incl
 if hits="$(grep -rniE "\b($PROJECT_NOUNS)\b" "$ROOT"/core "$ROOT"/skills 2>/dev/null)"; then
   fail "project noun leaked:"; printf '%s\n' "$hits" | head -3 | sed 's/^/       /'
 else pass "no project nouns anywhere"; fi
+
+echo "== blueprints load ONLY on explicit request =="
+# A blueprint is a personal house style. It is only safe to ship in a universal plugin
+# because it loads when asked for BY NAME and never on its own; one that can auto-load
+# imposes one person's taste on a stranger's repo. That rule lives in the description,
+# so the description is what gets tested.
+#
+# install.sh renders the Codex block with "${desc:0:150}…". A gate clause past char 150
+# is invisible to Codex — it would advertise the blueprint with the gate cut off. Truncate
+# with install.sh's own idiom and keep it that way: anything that merely approximates it
+# (`cut -c`, which counts bytes on some platforms and characters on others) drifts from the
+# code it is modelling, and a check that models the code loosely stops testing the code.
+#
+# Two words are not a gate. "only" and "explicit" are ordinary English (and "commonly"
+# contains "only"), so matching either one alone lets ungated prose through. Require the
+# restriction AND the request it is conditioned on, in the same sentence.
+# Known gap: this reads phrasing, not meaning. It proves the sentence is there, not that
+# the body honours it — review must do that.
+GATE_RESTRICT='\b(only|explicit(ly)?)\b[^.]*\b(ask(s|ed)?|request(s|ed)?|invoke[sd]?|name[sd]?|demand)\b'
+GATE_NEGATION="(do not|don't|never|must not) (load|use|apply|auto-load)[^.]*(general|other)"
+for d in "$ROOT"/skills/*-backend-blueprint/; do
+  [ -d "$d" ] || continue   # no blueprints yet: the glob stays literal, and that is fine
+  n="$(basename "$d")"; s="$d/SKILL.md"
+  [ -f "$s" ] || { fail "$n has no SKILL.md"; continue; }
+  desc="$(skill_desc "$s")"
+  # Herestrings, not `printf | grep -q`: this file already learned that grep -q exits on
+  # first match and SIGPIPEs the writer, which pipefail then reports as a failure.
+  # if/else, not `grep && pass || fail`: a pass whose printf fails (smoke.sh piped into
+  # head) falls straight through to fail and turns a clean repo red.
+  if grep -qiE "$GATE_RESTRICT" <<<"${desc:0:150}"; then
+    pass "$n gated within the first 150 chars"
+  else
+    fail "$n: gate clause missing from the first 150 chars of description (Codex truncates there)"
+  fi
+  if grep -qiE "$GATE_NEGATION" <<<"$desc"; then
+    pass "$n states the do-not-autoload rule"
+  else
+    fail "$n: description must say it must NOT load for general work in the language"
+  fi
+done
 
 echo
 [ "$FAIL" -eq 0 ] && echo "smoke: PASS" || echo "smoke: FAIL"
