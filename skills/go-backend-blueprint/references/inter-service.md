@@ -1252,7 +1252,7 @@ func (s *Store) Seen(
 		           values ($1, $2, $3)
 		           on conflict (provider, event_id) do nothing
 		           returning true`
-		err := s.db.QueryRowContext(ctx, q, provider, eventID, sc.TenantID).Scan(&inserted)
+		err := db.QueryRowContext(ctx, q, provider, eventID, sc.TenantID).Scan(&inserted)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // conflict: nothing was returned, and that IS the answer
 		}
