@@ -118,6 +118,7 @@ boundary, and by running the thing instead of trusting that it built.
 | **`backend-shape`** | Designing or bootstrapping a backend, adding a feature, deciding where code goes. Composition readable in one place, dependencies handed in rather than reached for, organise by feature not layer, typed boundaries, config read once. In an existing codebase **that codebase's shape wins** — this fires only when the choice is genuinely yours. |
 | **`ui-craft`** | Any UI work. De-slopping, primitive reuse, density above the fold, mobile-first, accent consistency, self-documenting controls. |
 | **`verify-for-real`** | Before claiming anything works. A build is not a verification. |
+| **`reviewing-for-scale`** | Reviewing a change or plan for whether it survives production scale, not whether it works. Indexability, the hidden count query, cost at N tenants, payload width, duplicated logic that drifts, tenant scope, unbounded inputs. The lens an "it's tested and it works" pass skips. |
 | **`git-discipline`** | Before the first `git add`. Explicit-path staging, branch flow, history safety, attribution. |
 | **`go-backend-blueprint`** | **Explicit invocation only — never on the agent's own initiative.** One person's house style for a Go backend, greenfield or full refactor. [See below](#blueprints). |
 
