@@ -129,6 +129,27 @@ governs that: a green build and a fast demo prove neither the problem nor the fi
   adds an index is not verified by the migration running - it is verified by the plan that
   uses it.
 
+## Proposing the fix
+
+A finding is half the review; the fix you recommend is the other half, and the failure here
+is **leading with the most expensive correct answer.** For any fix, lay out the full
+cost-and-quality spectrum before you recommend: the cheapest option that could work, what it
+trades away, and the heavier options that buy back what it gave up.
+
+- **Name the cheapest viable option first.** It is often a different behaviour, not a bigger
+  machine - a narrower match, a coarser result, a bound the user will not notice. It may be
+  all the situation needs, and it is the one the reader can ship this week. Lead with it, then
+  show what it costs.
+- **State what each option trades.** The cheap one usually spends quality or generality; the
+  heavy one spends build time, write cost, or a migration. A recommendation with no stated
+  tradeoff is a preference, not an analysis.
+- **Some choices are the reader's, not yours** - especially when the cheap option changes a
+  product behaviour rather than an implementation detail. Frame those as a decision with its
+  consequences laid out, and recommend; do not decree.
+- **Leading with the heaviest fix is its own anti-pattern.** It inflates the cost of acting,
+  buries the option the reader would have taken, and reads as gold-plating. Earn the expensive
+  answer by showing the cheap one falls short, not by reaching for it first.
+
 ## Reporting it
 
 Separate **what ships broken today** (a leak, a query that already times out) from **what
@@ -155,3 +176,4 @@ name the concrete failure: the input, the row count, who feels it, and when.
 | A query scoped by part of the tenant key | A cross-tenant leak waiting for the second tenant |
 | A required search field with minimum length one | The cheapest input triggers the widest scan |
 | A scale verdict with no query plan behind it | A hypothesis wearing a conclusion's clothes |
+| A recommended fix with no cheaper option beside it | The cost/quality spectrum was never laid out |
