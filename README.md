@@ -113,6 +113,7 @@ boundary, and by running the thing instead of trusting that it built.
 | Skill | Fires when |
 |---|---|
 | **`software-engineer-intuition`** | Before anything non-trivial. The gate: calibrate blast radius → research prior art → trace side effects → name the pattern → post a Change Brief → ask on the forks. |
+| **`code-comprehension`** | Before editing, refactoring or debugging code that already exists. Trace the real path, check a function is reachable before touching it, learn why each part is there, and verify every fact the change rests on by reading the source. Your memory of the code is not evidence. |
 | **`engineering-standards`** | Writing or reviewing code. Contract programming, fitting the existing structure, isolating vendors, typed errors, idempotency, snapshot-at-write, and not writing AI-looking code. |
 | **`backend-shape`** | Designing or bootstrapping a backend, adding a feature, deciding where code goes. Composition readable in one place, organise by feature not layer, typed boundaries, config read once. In an existing codebase **that codebase's shape wins** — this fires only when the choice is genuinely yours. |
 | **`ui-craft`** | Any UI work. De-slopping, primitive reuse, density above the fold, mobile-first, accent consistency, self-documenting controls. |

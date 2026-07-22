@@ -1,6 +1,6 @@
 ---
 name: git-discipline
-description: Use before any git operation on someone else's repository - staging, committing, branching, pushing, or opening a PR. Covers safe staging (never `add -A`), branch flow, commit authorship and attribution, history safety (no force-push or rebase on shared work), and writing a commit message that explains why. Load it before the first `git add`, not after.
+description: Use before any git operation on someone else's repository - staging, committing, branching, pushing, or opening a PR. Covers safe staging (never `add -A`), branch flow, checking the base branch moved before merging into it, commit authorship and attribution, history safety (no force-push or rebase on shared work), and writing a commit message that explains why. Load it before the first `git add`, not after.
 ---
 
 # Git Discipline
@@ -32,7 +32,35 @@ what you did not look at.
   Don't merge locally and push what should have gone through a PR.
 - Don't delete branches unless asked. Someone may be reading them.
 
-## 3. Never rewrite shared history
+## 3. Check the base moved before you merge into it
+
+Other people push to the shared branch while your branch is open. The window between
+opening a PR and merging it is exactly when that happens.
+
+```sh
+git fetch origin
+git rev-list --count <your-branch>..origin/<base>   # 0 = base unchanged, merge
+git log --oneline <your-branch>..origin/<base>      # who moved it, and what they did
+```
+
+Not zero? **Integrate the base into your branch - never the other way round.**
+
+```sh
+git checkout <your-branch>
+git merge origin/<base>     # resolve here, on your branch
+# then re-run the checks: tests, types, build
+git push origin <your-branch>
+```
+
+- **Resolve on your branch, not during the merge.** A conflict resolved while merging puts
+  your judgement call straight into the shared branch, where a mistake becomes everyone's.
+- **"No conflicts" is not the check.** A host's mergeable badge detects *textual* overlap.
+  Someone else's change can merge cleanly and still break yours: a renamed export, a
+  changed prop, a new required env var, an added dependency. Only re-running the checks
+  after integrating proves it works.
+- Do this immediately before merging, not when you opened the PR.
+
+## 4. Never rewrite shared history
 
 - **No force-push.** No rebase of work that has been pushed. No amending a commit that
   someone else may have pulled.
@@ -40,7 +68,7 @@ what you did not look at.
   rewrite it.
 - If you must change an unpushed commit of your own, say so first.
 
-## 4. Authorship and attribution
+## 5. Authorship and attribution
 
 - **Use the identity the project specifies.** Not your global default. If the project names
   a committer, use it.
@@ -50,7 +78,7 @@ what you did not look at.
   to add one.** When your default and their rule disagree, they win.
 - Don't bypass hooks (`--no-verify`). They exist because someone got burned.
 
-## 5. Write the message for the person debugging this in a year
+## 6. Write the message for the person debugging this in a year
 
 They will arrive here from `git blame`, mid-incident, with no context and no patience.
 
@@ -63,7 +91,7 @@ They will arrive here from `git blame`, mid-incident, with no context and no pat
   `git blame` cares how the sausage was made.
 - If it changes behaviour someone could be surprised by, say so explicitly.
 
-## 6. PRs
+## 7. PRs
 
 - The body explains the problem before the solution. Lead with the impact.
 - Say what you verified and how - and what you did **not**.
@@ -82,3 +110,4 @@ They will arrive here from `git blame`, mid-incident, with no context and no pat
 | Adding a tool/co-author trailer | Check the project's rule first - it outranks your default |
 | Writing a message that only says what the diff says | Write down the why |
 | About to rebase pushed work | It's shared. Fix forward. |
+| Merging without fetching first | The base may have moved. Check, integrate, re-run the checks |

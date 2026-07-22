@@ -19,5 +19,9 @@ policy.** Run their procedure. Hold this gate's bar while you do.
   procedure. `git-discipline` owns the policy: what may be pushed where, and by whom.
   Policy outranks procedure where they touch.
 
-`engineering-standards`, `backend-shape`, `ui-craft`, and the blueprints have no
-counterpart there. They stand alone.
+`code-comprehension`, `engineering-standards`, `backend-shape`, `ui-craft`, and the
+blueprints have no counterpart there. They stand alone.
+
+- **Before touching existing code.** Nothing in superpowers establishes what the code you
+  are about to change actually is. `brainstorming` explores what to build; `code-comprehension`
+  makes sure the plan rests on the source rather than on recall.

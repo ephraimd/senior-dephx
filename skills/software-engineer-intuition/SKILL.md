@@ -48,6 +48,12 @@ When torn between two tiers, take the higher one.
 
 Questions 1-3 are answered by **reading the codebase**, never by asking the human.
 
+Where the change touches code that already exists, the facts behind them must be *read,
+not recalled* - a field name, a wiring, an execution order, a status you believe
+propagates. `code-comprehension` owns that: trace the path, check the function is even
+reachable, verify each fact against the source. A brief can be right about blast radius,
+prior art and pattern, and still rest entirely on a misremembered shape.
+
 1. **What wheel am I reinventing?** Grep for the nearest existing thing first. What can I
    reuse? If I am about to write the same shape a second time, **extract it into a
    reusable primitive** (a shared component dir, a package, a helper, a hook, a choke
@@ -104,6 +110,7 @@ facts. This plugin ships the domain-agnostic set:
 
 | Domain | Skill |
 |---|---|
+| Understanding existing code before changing it | `code-comprehension` |
 | Structure, contracts, naming, integrations | `engineering-standards` |
 | Visual quality, density, mobile, de-slop | `ui-craft` |
 | Proving a change actually works | `verify-for-real` |
@@ -130,6 +137,7 @@ skill is complete without them.
 | Writing code so a test or compiler passes | Coding to correctness, not to a pattern |
 | Reaching for a new library for something the repo already does | Reinventing and bloating |
 | The fix works but you cannot explain why it is safe | You found a symptom, not the root cause |
+| Describing existing behaviour you have not opened | You are recalling, not reading - `code-comprehension` |
 | Applying your default over the human's stated rule | Their instruction outranks your default |
 
 ## Close the loop
