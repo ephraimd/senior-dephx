@@ -36,6 +36,26 @@ for d in "$ROOT"/skills/*/; do
   [ -n "$name" ] && [ -n "$desc" ] && pass "$n frontmatter"
 done
 
+echo "== frontmatter is valid YAML the way a strict parser reads it =="
+# The extraction above is lenient - awk splits on the first ': ' and never notices that
+# GitHub's YAML parser (Ruby/Psych) would reject the line. An unquoted description with a
+# ': ' inside it reads as a nested mapping and errors with "mapping values are not allowed
+# in this context" - visible on github.com, invisible to every check that just greps the
+# value out. Catch the exact shape here, dependency-free.
+for d in "$ROOT"/skills/*/; do
+  s="$d/SKILL.md"; n="$(basename "$d")"
+  [ -f "$s" ] || continue
+  # The raw description value, exactly as written (quotes and all).
+  raw="$(awk '/^description:/{sub(/^description:[[:space:]]*/, ""); print; exit}' "$s")"
+  case "$raw" in
+    '"'*'"' | "'"*"'") pass "$n description safely quoted" ;;   # a quoted scalar may contain anything
+    *": "*)
+      fail "$n description has an unquoted ': ' — a strict YAML parser reads it as a mapping (\"mapping values are not allowed\"). Quote the description or rephrase the colon."
+      ;;
+    *) pass "$n description is colon-safe" ;;
+  esac
+done
+
 echo "== hook is executable and emits the gate =="
 if [ -x "$ROOT/hooks/session-start.sh" ]; then pass "hook executable"; else fail "hook not executable"; fi
 # Capture, don't pipe. `grep -q` exits on first match and SIGPIPEs the hook mid-write; the
