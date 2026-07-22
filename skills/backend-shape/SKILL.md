@@ -1,6 +1,6 @@
 ---
 name: backend-shape
-description: Use when designing or bootstrapping a backend service, adding a resource or feature to one, deciding where a new piece of code should live, or working in a project whose structure gives no clear answer. Covers the one-place composition rule, organising by feature rather than layer, what each layer may and may not do, typed boundaries, framework choice, startup configuration, and interface seams. In an existing codebase that codebase's shape wins - this fires only when the choice is genuinely yours.
+description: Use when designing or bootstrapping a backend service, adding a resource or feature to one, deciding where a new piece of code should live, or working in a project whose structure gives no clear answer. Covers the one-place composition rule, dependencies handed in rather than reached for, organising by feature rather than layer, what each layer may and may not do, typed boundaries, framework choice, startup configuration, and interface seams. In an existing codebase that codebase's shape wins - this fires only when the choice is genuinely yours.
 ---
 
 # Backend Shape
@@ -143,6 +143,17 @@ that boundary and for nothing else.
   something it does not own. `engineering-standards` §3 governs what happens on the far
   side of it.
 
+**Dependencies are handed in, never reached for.** Whatever a unit needs - a clock, a
+store, a client, a queue - arrives through its constructor or its arguments. A unit that
+reaches out to a global, a singleton, or a service locator has a dependency the caller
+cannot see, cannot substitute, and cannot test around. That is the same rule as the
+composition one: if it was not passed at the root, the root no longer describes the
+application.
+
+**Depend on the abstraction you own, not the one a vendor gave you.** The seam takes your
+type; the adapter behind it speaks the vendor's. Otherwise the vendor's shape spreads
+through the callers and the seam stops being a seam.
+
 ## Red flags
 
 | You catch yourself… | It means |
@@ -157,6 +168,7 @@ that boundary and for nothing else.
 | A decision that cannot run without a request | Transport leaked into the decision layer |
 | A permission check written into a query | Policy hiding where nobody reviews it |
 | Config read lazily on first use | A boot error deferred until a user finds it |
+| A unit fetching a global or singleton it was not handed | A hidden dependency nobody can substitute |
 | An interface whose second implementation you cannot name | Paperwork, not a seam |
 | A large dependency taken on for one function | A permanent cost for a temporary saving |
 | "I'll extract it when a third caller shows up" | Reused twice → extract it |
