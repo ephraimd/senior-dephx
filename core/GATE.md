@@ -23,7 +23,9 @@ Torn between two tiers? Take the higher one.
 
 ## The five questions
 
-Questions 1-3 are answered by **reading the code**, never by asking the human.
+Questions 1-3 are answered by **reading the code**, never by asking the human. Where the
+code already exists, read it rather than recall it - a misremembered field name survives
+a perfect brief, and passing tests can encode the same wrong assumption.
 
 1. **What wheel am I reinventing?** Grep for the nearest existing thing first. Writing the
    same shape a second time means extract a primitive, not copy it.
