@@ -1,6 +1,6 @@
 ---
 name: code-comprehension
-description: Use before editing, refactoring, extending, or debugging code that already exists - and before writing a spec or plan against it. Forces you to read the real code rather than recall it: trace the path end to end, check a function is even reachable before touching it, learn why each part is there, and verify every fact the change rests on by reading the source. Also use the moment you notice you are describing behaviour you have not actually opened, or a fix passes its tests but you cannot say why it is correct.
+description: Use before editing, refactoring, extending, or debugging code that already exists - and before writing a spec or plan against it. Forces you to read the real code rather than recall it - trace the path end to end, check a function is even reachable before touching it, learn why each part is there, and verify every fact the change rests on by reading the source. Also use the moment you notice you are describing behaviour you have not actually opened, or a fix passes its tests but you cannot say why it is correct.
 ---
 
 # Code Comprehension
