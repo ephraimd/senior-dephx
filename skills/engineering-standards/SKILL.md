@@ -1,6 +1,6 @@
 ---
 name: engineering-standards
-description: Use when writing or reviewing any non-trivial code - adding a file, a model, an endpoint, a third-party integration, or a constant. Covers contract programming (no scattered magic values), keeping to the project's existing file/folder structure, isolating external services, layer discipline, error handling, and avoiding AI-looking code. Also use when a change "works" but feels like it was bolted on rather than fitted in.
+description: Use when writing or reviewing any non-trivial code - adding a file, a model, an endpoint, a third-party integration, or a constant. Covers contract programming (no scattered magic values), keeping to the project's existing file/folder structure, building the simplest thing that works, knowing what the code costs to run (no I/O in a loop, bounded inputs), isolating external services, layer discipline, error handling, and avoiding AI-looking code. Also use when a change "works" but feels like it was bolted on rather than fitted in.
 ---
 
 # Engineering Standards
@@ -85,7 +85,51 @@ own boundary (a package, a client module), never inlined into business logic.
 - **One writer.** If two paths can change the same balance or status, they will disagree.
   Funnel them through one choke point.
 
-## 6. Don't write AI-looking code
+## 6. The simplest thing that works
+
+Generality you were not asked for is a cost you pay forever and a bet you usually lose.
+
+- **Build for the requirement that exists.** Not the one you imagine arriving. The test:
+  **name who asked for it.** If the answer is "it might be useful later", it is not a
+  requirement, it is a guess with maintenance attached.
+- **One implementer is not an abstraction.** A wrapper, options bag, strategy, or config
+  flag with exactly one real case is indirection charging rent. Inline it until a second
+  case appears and shows you where the seam actually is.
+- **A flag that no caller sets, or that only ever takes one value, is dead.** Delete it
+  rather than carrying it.
+- **Solve it where it happens.** Reaching for a framework, a queue, or a cache before you
+  have the problem they solve buys operational surface, not capability.
+- **Delete, do not comment out.** History remembers. Commented-out code is a question every
+  future reader has to answer.
+
+Simple is not the same as short. A dense one-liner nobody can read is not simpler than four
+obvious lines - it has just moved the cost onto the next person.
+
+## 7. Know what it costs
+
+Correct and unusably slow is a bug report. Know the shape of the work before shipping it.
+
+- **Say what runs per item and what runs per request.** If you cannot, you do not yet know
+  what you wrote.
+- **No I/O inside a loop.** A query, HTTP call, or file read per element is the single most
+  common way a feature that worked on ten rows dies on ten thousand. Fetch the set in one
+  call, then map over it in memory.
+- **Filter and aggregate where the data lives.** Pulling a table across the wire to count,
+  sum, or filter it in application code moves the cost from an engine built for it to one
+  that is not - and to memory that has a limit.
+- **Ask what makes this slow, and whether a user can supply it.** Input a caller controls -
+  a page size, a date range, a list of ids, an upload - is an input that will eventually be
+  large, whether by accident or on purpose. Bound it.
+- **Name the growth when it is not flat.** Linear is usually fine. A nested loop over two
+  collections that both grow, a query inside a loop, or a repeated scan is where it stops
+  being fine, and it is worth one sentence in the PR.
+- **Whatever you filter or join by wants an index** - and adding one on a large live table
+  is itself a migration with a cost. Say so rather than discovering it in production.
+
+Measure before optimising anything subtle. But the items above are not subtle; they are
+shape, and shape is visible while writing.
+
+## 8. Don't write AI-looking code
 
 - **No tutorial comments.** Don't narrate what the next line does.
 - **Comment the non-obvious *why*,** especially a constraint the code cannot show: why this
@@ -97,6 +141,24 @@ own boundary (a package, a client module), never inlined into business logic.
   author wrote it is a smell even when it's correct.
 - Prefer deleting to adding. The best version of most changes is smaller than the first
   draft.
+
+## If someone names a principle
+
+These rules are the usual principles, written as things you can check. When a human asks
+whether something is SOLID, DRY, or KISS, map the word to the rule and answer with the
+rule - not with the definition.
+
+| They say | The rule that already covers it |
+|---|---|
+| Single responsibility | §1 one file, one job · `backend-shape` §3 each layer does only its job |
+| Open/closed, Liskov, interface segregation | `backend-shape` §7 one interface per axis of change - name the second implementation |
+| Dependency inversion / "use DI" | `backend-shape` §7 dependencies handed in, never reached for; depend on the abstraction you own |
+| DRY | §2 a value repeated is a missing contract · §1 build bulk on top of single |
+| KISS / YAGNI | §6 the simplest thing that works - name who asked for it |
+| Big-O, "is this efficient?" | §7 know what it costs - what runs per item, and what a caller can make large |
+
+Naming the principle is not the work. **Two copies of a rule that must agree will drift,
+and the drift is invisible until it costs something** is the work.
 
 ## Red flags
 
@@ -112,5 +174,11 @@ own boundary (a package, a client module), never inlined into business logic.
 | A comment explaining what, not why | Delete it |
 | A setting read live where it should have been snapshotted | The terms can change after the fact |
 | An update that sends only the fields you changed | A replace endpoint deletes the rest |
+| A query, request, or file read inside a loop | It works on ten rows and dies on ten thousand |
+| Fetching a collection to count or filter it in memory | The engine could have answered that |
+| An unbounded limit on anything a caller controls | Someone will eventually send all of it |
+| An interface, wrapper, or flag with one real case | Indirection charging rent - inline it |
+| Building for a requirement nobody stated | Name who asked, or do not build it |
+| Code commented out "for later" | History remembers. Delete it |
 | A provider's events trusted to cover every change | The gaps surface only as missing data |
 | A business rejection queued for retry | A result retried as though it were a fault |
