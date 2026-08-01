@@ -126,8 +126,26 @@ Correct and unusably slow is a bug report. Know the shape of the work before shi
 - **Whatever you filter or join by wants an index** - and adding one on a large live table
   is itself a migration with a cost. Say so rather than discovering it in production.
 
+- **A write costs more than its own table.** Every index on it is rewritten, every foreign
+  key is checked, every trigger fires, and every cascade reaches a table you did not name. An
+  insert into a heavily-indexed table is not the cheap operation it reads as, and a cascade
+  nobody traced is a write nobody reviewed.
+- **Say what the statement locks, and who waits behind it.** A long transaction, a bulk
+  update, or an index build on a live table blocks somebody - readers, writers, or the next
+  migration. If you cannot name who waits, you do not yet know what you wrote.
+- **Ask what else reads this table while you write to it.** A table is rarely used by one
+  path. Your query shares its locks and its cache with every other query on it, and the one
+  that degrades will not be yours.
+
 Measure before optimising anything subtle. But the items above are not subtle; they are
 shape, and shape is visible while writing.
+
+**None of this licenses building for scale you do not have.** §6 still governs: the simplest
+thing that works. Each check above costs a sentence of thought and is answerable while
+writing - that is what makes it shape rather than optimisation. Sharding, caching layers,
+read replicas and denormalised copies are the opposite: they answer a problem you must
+already have, and reaching for one early buys operational surface and a second copy of a
+rule that will drift.
 
 ## 8. Don't write AI-looking code
 

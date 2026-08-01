@@ -100,6 +100,20 @@ The non-negotiables, on one screen. The references explain how; this is the chec
 - **Background work uses the unified worker pattern.** One shape for every job. Bare
   goroutines have no lifecycle, no retry, no dedupe, no observability, and no way to be
   stopped - so the first thing shutdown does is abandon them.
+- **gin is the HTTP framework, and it supplies routing and middleware - not the guarantees
+  above.** The envelope, the middleware order, the pagination executor and the typed context
+  accessor are still written once, by hand, and are the only permitted implementations. gin's
+  context is `map[string]any`: reading a request value by raw string key scatters a magic
+  literal through every handler, which is a missing contract wearing the clothes of a
+  convenience.
+- **GORM is the data layer, and it never owns the schema.** Migrations are versioned SQL.
+  `AutoMigrate` cannot express a policy, a grant, a check constraint or a partial index, so a
+  schema it manages is one whose real guarantees are invisible to it - and invisible
+  guarantees are the ones that get dropped. Models are storage types and never cross a
+  boundary; returning one is a single line, which is exactly why it is a review red flag.
+  `Preload` is deliberate, because association loading inside a loop is the N+1 that worked
+  on ten rows. Raw SQL where the query shape genuinely demands it, inside the store, never as
+  an escape from the layer.
 
 ## References
 
@@ -119,6 +133,12 @@ quietly relocated or merged. An index that drifts from its references is a lie t
 whoever trusted it, and one wrong entry retires the whole table. If you move a file or
 fold one subject into another, this table changes in the same commit or it is already
 wrong.
+
+**Status: the reference code has not yet been converted.** The five files still show
+`net/http` and `database/sql`. The spine above is the current standard; where a reference
+contradicts it, the spine wins and the file is pending. This note exists because an index
+that quietly disagrees with its references is the lie this table is meant to prevent, and
+a half-converted standard that does not say so is worse than either shape alone.
 
 They are written to be built from, not cited. Every helper the standard names is defined
 in one of them, so a fresh repository can be constructed from these five and nothing else.
