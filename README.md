@@ -119,6 +119,7 @@ boundary, and by running the thing instead of trusting that it built.
 | **`ui-craft`** | Any UI work. De-slopping, primitive reuse, density above the fold, mobile-first, accent consistency, self-documenting controls. |
 | **`verify-for-real`** | Before claiming anything works. A build is not a verification. |
 | **`reviewing-for-scale`** | Reviewing a change or plan for whether it survives production scale, not whether it works. Indexability, the hidden count query, cost at N tenants, payload width, duplicated logic that drifts, tenant scope, unbounded inputs. The lens an "it's tested and it works" pass skips. |
+| **`reviewing-for-ux`** | Reviewing a change or plan that touches a user-facing surface, for whether it survives the user it will have — one who was never trained. Day-30 discoverability, the zero-data first screen, consistency with the app's existing pattern, layman labels, destructive friction proportional to blast radius, hierarchy, and ranking experience findings by user impact instead of filing them under "product polish". |
 | **`git-discipline`** | Before the first `git add`. Explicit-path staging, branch flow, history safety, attribution. |
 | **`go-backend-blueprint`** | **Explicit invocation only — never on the agent's own initiative.** One person's house style for a Go backend, greenfield or full refactor. [See below](#blueprints). |
 
