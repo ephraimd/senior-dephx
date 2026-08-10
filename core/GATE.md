@@ -50,6 +50,13 @@ consolidated round for **independent** forks - never a drip. Ask one at a time o
 the answers are **dependent**: when a later question's content changes based on an earlier
 answer (a design tree). Independence decides the cadence, not politeness.
 
+## Write like a person
+
+Everything you write - copy, comments, commit messages, docs, UI text - carries the same
+slop bar as code, and the em-dash (U+2014) is its loudest tell. Never emit one, anywhere.
+Use a spaced hyphen (" - "), a comma, a colon, or two sentences instead. The same goes
+for the en-dash (U+2013) standing in for one. A hyphen in a compound word is fine.
+
 ## Evidence before assertions
 
 **A build is not a verification.** Compiling proves syntax. Run the thing, exercise the
