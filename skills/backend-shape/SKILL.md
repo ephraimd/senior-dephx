@@ -61,9 +61,10 @@ per feature; everything that changes when the feature changes lives inside it.
 - **A feature reaches another feature through its exposed surface, never into its
   internals.** An internal that two features both need is a shared thing that has not been
   named yet: find it, name it, move it to the shared place.
-- Shared building blocks live in one shared location, and a thing is shared when it has
-  *two* real consumers - not when you can picture a second one. **Reused twice → extract
-  it.** Once is a coincidence you would be wrong to design around.
+- Shared building blocks live in one shared location. `engineering-standards` §1 owns *when*
+  something has become shared; this owns *where it goes*. A block left sitting inside the
+  feature that happened to need it first is a line every later feature has to reach across,
+  into internals the rule above just told them not to touch.
 
 ## 3. Each layer does only its job
 
@@ -108,9 +109,9 @@ that boundary and for nothing else.
 - **Adopting one is a decision to surface**, not a default you arrive with. It lands in the
   composition root, in the build, in the deploy, and in the head of every person who ever
   reads this service.
-- **Never adopt one for a fraction of it.** A large dependency taken on for a single
-  function you could write yourself is a permanent cost bought with a temporary saving -
-  and its next major version is now your migration.
+- **Never adopt one for a fraction of it.** `engineering-standards` §1 states that cost in
+  general; a framework is where it compounds, because leaving one later means rewriting the
+  wiring of everything that grew inside it.
 - The wiring rule does not bend for the tool. If its default is to discover its own wiring
   by scanning the tree, configure it to be declared at the root instead. A tool's
   convenience never outranks the codebase's legibility.
@@ -171,4 +172,4 @@ through the callers and the seam stops being a seam.
 | A unit fetching a global or singleton it was not handed | A hidden dependency nobody can substitute |
 | An interface whose second implementation you cannot name | Paperwork, not a seam |
 | A large dependency taken on for one function | A permanent cost for a temporary saving |
-| "I'll extract it when a third caller shows up" | Reused twice → extract it |
+| "I'll extract it when a third caller shows up" | `engineering-standards` §1 - twice is the trigger |

@@ -59,9 +59,9 @@ the same style soup a second time, that's the bug.
 - **Use the project's primitives.** Import them; don't rebuild them inline.
 - **One canonical primary action.** A second "primary" style is drift, not a variant. If
   you find two, that is a bug to report, not a choice to copy.
-- **Reused 2+ times → extract a primitive** into the shared directory, following whatever
-  variant mechanism the project already uses. Do not introduce a second mechanism, and do
-  not add a styling library the project does not already have.
+- **Extract a primitive into the shared directory** once `engineering-standards` §1 says it
+  is time, following whatever variant mechanism the project already uses. Do not introduce
+  a second mechanism, and do not add a styling library the project does not already have.
 
 ## 3. Density - content above the fold
 
