@@ -54,10 +54,17 @@ propagates. `code-comprehension` owns that: trace the path, check the function i
 reachable, verify each fact against the source. A brief can be right about blast radius,
 prior art and pattern, and still rest entirely on a misremembered shape.
 
-1. **What wheel am I reinventing?** Grep for the nearest existing thing first. What can I
-   reuse? If I am about to write the same shape a second time, **extract it into a
-   reusable primitive** (a shared component dir, a package, a helper, a hook, a choke
-   point) instead of copying it. Reuse beats invention; extraction beats duplication.
+1. **What wheel am I reinventing?** Search before writing, and search for the *behaviour*,
+   not for the name you would have given it - prior art almost never carries your word for
+   it. Three passes, each finding what the others miss: **this repo** (the shared
+   directories, the nearest sibling feature, the call sites of anything shaped like this),
+   **what is already installed** (a package the project depends on for one thing usually
+   does four), and **the language's own library**. If I am about to write the same shape a
+   second time, **extract it into a reusable primitive** (a shared component dir, a package,
+   a helper, a hook, a choke point) instead of copying it. Reuse beats invention; extraction
+   beats duplication. `engineering-standards` §1 owns what the answer obliges - including
+   the inverse, where the wheel being reinvented is a dependency added for something the
+   project already does.
 2. **What breaks?** Who else reads or writes this table, contract, component, or route?
    Which existing rule or invariant could this violate? Trace at least one concrete
    failure scenario end to end.
@@ -111,8 +118,10 @@ facts. This plugin ships the domain-agnostic set:
 | Domain | Skill |
 |---|---|
 | Understanding existing code before changing it | `code-comprehension` |
-| Structure, contracts, naming, integrations | `engineering-standards` |
+| Reuse, structure, contracts, naming, integrations | `engineering-standards` |
 | Visual quality, density, mobile, de-slop | `ui-craft` |
+| Reviewing whether a change survives the data it will have | `reviewing-for-scale` |
+| Reviewing a user-facing surface as the newest user | `reviewing-for-ux` |
 | Proving a change actually works | `verify-for-real` |
 | Branching, commits, attribution | `git-discipline` |
 

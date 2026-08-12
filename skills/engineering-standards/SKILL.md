@@ -1,6 +1,6 @@
 ---
 name: engineering-standards
-description: Use when writing or reviewing any non-trivial code - adding a file, a model, an endpoint, a third-party integration, or a constant. Covers contract programming (no scattered magic values), keeping to the project's existing file/folder structure, building the simplest thing that works, knowing what the code costs to run (no I/O in a loop, bounded inputs), isolating external services, layer discipline, error handling, and avoiding AI-looking code. Also use when a change "works" but feels like it was bolted on rather than fitted in.
+description: Use when writing or reviewing any non-trivial code - adding a file, a model, an endpoint, a third-party integration, or a constant. Covers reusing what the project already has before adding to it (the same shape written twice, a dependency for something already solved, a change bigger than the problem it fixes, a file grown past its one job), contract programming (no scattered magic values), keeping to the project's existing file/folder structure, building the simplest thing that works, knowing what the code costs to run (no I/O in a loop, bounded inputs), isolating external services, layer discipline, error handling, and avoiding AI-looking code. Also use when a change "works" but feels like it was bolted on rather than fitted in, and when reviewing a diff for whether part of it re-implements something that already exists.
 ---
 
 # Engineering Standards
@@ -11,15 +11,34 @@ How code should be *shaped* once you have decided what to build. The decision it
 None of this names a language or framework. **Read the project's own rules and mirror its
 existing shape first** - these standards tell you what to look for and what to refuse.
 
-## 1. Fit the existing structure
+## 1. Reuse what exists; fit what you add
 
-The project already has a pattern. Find it and obey it.
+The project already has a pattern, and it already has more code than you remember. Find
+both and obey them. `software-engineer-intuition` Q1 owns *how* to search; this owns what
+the answer obliges you to do.
 
+- **Reused twice is the trigger to extract, not the third time.** A thing is shared when it
+  has two real consumers, not when you can picture a second one. Once is a coincidence you
+  would be wrong to design around; twice is a seam, and the two copies have already begun
+  to drift in ways nobody has noticed yet. `backend-shape` §2 and `ui-craft` §2 say where
+  the extracted thing lives in their domains.
+- **A dependency for something the project already does is rent on code you own.** Before
+  adding one, establish what is already here: the language's own library, a package the
+  project already depends on, a helper someone wrote two features ago. You inherit its
+  upgrades, its advisories and its next major version, and you took all of that on to avoid
+  writing something that already exists.
 - **Do not invent a parallel structure.** If features live in a certain shape, yours lives
   in that shape too. A new top-level directory is a decision to surface, not to make while
   nobody is looking.
-- **Do not create a new file when the logic belongs in an existing one.** "It felt cleaner
-  in its own file" is how a codebase acquires six services that should be one.
+- **Do not create a new file when the logic belongs in an existing one,** and ask the same
+  question of the whole change: could this have been an edit to what is already there? A
+  new module standing beside a function that does nine tenths of the job is the same
+  failure as a new file, at a size nobody reviews line by line. "It felt cleaner in its own
+  file" is how a codebase acquires six services that should be one.
+- **A file grown past the one job its name claims is a seam nobody has named.** The length
+  is the symptom; the finding is the second job hiding in it. Say what that job is and give
+  it its own home. Splitting on a line count instead cuts through the middle of one job and
+  leaves two files that must always change together.
 - **Respect the layer split.** Whatever the project's layers are - transport, business
   logic, data, presentation - keep each doing only its own job. Business decisions do not
   belong in a request handler; HTTP status codes do not belong in a service; queries do not
@@ -153,7 +172,8 @@ rule - not with the definition.
 | Single responsibility | §1 one file, one job · `backend-shape` §3 each layer does only its job |
 | Open/closed, Liskov, interface segregation | `backend-shape` §7 one interface per axis of change - name the second implementation |
 | Dependency inversion / "use DI" | `backend-shape` §7 dependencies handed in, never reached for; depend on the abstraction you own |
-| DRY | §2 a value repeated is a missing contract · §1 build bulk on top of single |
+| DRY | §2 a value repeated is a missing contract · §1 reused twice, extract it · §1 build bulk on top of single |
+| "Don't reinvent the wheel" | §1 reuse what exists - and the inverse, a dependency for what the project already does |
 | KISS / YAGNI | §6 the simplest thing that works - name who asked for it |
 | Big-O, "is this efficient?" | §7 know what it costs - what runs per item, and what a caller can make large |
 
@@ -171,6 +191,10 @@ and the drift is invisible until it costs something** is the work.
 | A status check outside the transaction that writes | Not a guard - a race |
 | A new top-level directory | A structural decision made silently |
 | A second implementation of an existing rule | It will drift, and drift costs money |
+| The same shape written a second time | Twice is the trigger to extract, not the third time |
+| A new dependency for something the project already does | Rent on code you already own |
+| A new module beside one that does most of the job | The change is bigger than the problem |
+| A file that no longer matches the one job its name claims | A second job nobody has named |
 | A comment explaining what, not why | Delete it |
 | A setting read live where it should have been snapshotted | The terms can change after the fact |
 | An update that sends only the fields you changed | A replace endpoint deletes the rest |

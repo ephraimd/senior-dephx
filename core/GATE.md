@@ -75,6 +75,7 @@ State plainly what you did NOT do and what remains unproven.
 | Unable to say what the user gains | You are building the wrong thing |
 | Writing code so a test or compiler passes | Coding to correctness, not to a pattern |
 | Reaching for a library for something the repo already does | Reinventing and bloating |
+| A new file or module beside one that does most of the job | The change is bigger than the problem |
 | The fix works but you cannot explain why it is safe | You found a symptom, not the cause |
 
 **The human's own instructions - their AGENTS.md, CLAUDE.md, project rules, or a direct
