@@ -26,8 +26,25 @@ SUPER="$ROOT/core/SUPERPOWERS.md"
 # bare failing test kills the script and a dead hook emits no gate at all - a far worse
 # outcome than a missing deference note. Hence: no bare globs (an unmatched one stays
 # literal and would false-positive), every status either consumed by an `if` or defused.
+#
+# Where to look depends on which tool launched this hook, and the hook's own install path
+# says which: a marketplace install lives at <tool home>/plugins/cache/<marketplace>/
+# <plugin>/<version>, and both Claude Code and Codex use that layout. So a cached install
+# searches only its own tool's cache, at exactly <marketplace>/superpowers. Two failures
+# that avoids: Codex reading Claude Code's superpowers (or missing its own, on a machine
+# without Claude Code), and a leftover plugins/data/superpowers-* directory - which
+# outlives an uninstall - pointing the agent at skills that are no longer there.
+# Anything else (a --plugin-dir or linked dev install) keeps the original broad search.
 superpowers_present() {
-  local search="${SENIOR_DEPHX_PLUGIN_SEARCH:-${HOME:-}/.claude/plugins:$PWD/.claude/plugins}"
+  local search depth=4 name='superpowers*'
+  if [ -n "${SENIOR_DEPHX_PLUGIN_SEARCH:-}" ]; then
+    search="$SENIOR_DEPHX_PLUGIN_SEARCH"
+  else
+    case "$ROOT" in
+      */plugins/cache/*) search="${ROOT%%/plugins/cache/*}/plugins/cache"; depth=2; name='superpowers' ;;
+      *) search="${HOME:-}/.claude/plugins:$PWD/.claude/plugins" ;;
+    esac
+  fi
   local roots=() root hit
   # read -a, not `for root in $search`: unquoted expansion would also glob-expand a root
   # containing a wildcard. The herestring guarantees the trailing newline read wants.
@@ -35,7 +52,7 @@ superpowers_present() {
   for root in "${roots[@]+"${roots[@]}"}"; do
     if [ -z "$root" ] || [ ! -d "$root" ]; then continue; fi
     # No pipe to `head`: SIGPIPE plus pipefail would surface as a failed assignment.
-    hit="$(find "$root" -maxdepth 4 -type d -name 'superpowers*' -print 2>/dev/null || true)"
+    hit="$(find "$root" -maxdepth "$depth" -type d -name "$name" -print 2>/dev/null || true)"
     if [ -n "$hit" ]; then return 0; fi
   done
   return 1
