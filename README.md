@@ -55,18 +55,16 @@ This plugin makes it the default instead.
 "plugin": ["senior-dephx@git+https://github.com/ephraimd/senior-dephx.git"]
 ```
 
-**Codex** takes two steps: the plugin brings the skills, and `AGENTS.md` brings the gate
-(Codex plugins cannot run hooks, so the plugin alone never loads it):
+**Codex** installs it as a plugin, from the same marketplace:
 
 ```sh
 codex plugin marketplace add ephraimd/senior-dephx
 codex plugin add senior-dephx@senior-dephx
-git clone https://github.com/ephraimd/senior-dephx.git ~/senior-dephx
-~/senior-dephx/install.sh --codex     # writes the gate into ~/.codex/AGENTS.md
 ```
 
-Clone somewhere you will keep: the `AGENTS.md` block points at that clone's skill files by
-absolute path.
+Codex runs a plugin's hooks only once you have trusted them, so approve senior-dephx's
+SessionStart hook when Codex asks: that hook is what loads the gate. See
+[A note on Codex](#a-note-on-codex) for a Codex without plugin support.
 
 That's it. No config, no per-project setup.
 
@@ -238,23 +236,24 @@ present, and nothing there is restated here. Where they touch, the split is one 
 `engineering-standards`, `ui-craft`, and the rest have no counterpart there.
 
 Claude Code and OpenCode **detect it at runtime** and say this only when it is genuinely
-installed. Codex can't detect anything, so it gets the same text under an "if it's
-installed" sentence. Either way, you're never pointed at a skill that isn't there.
+installed. The `AGENTS.md` install has no runtime to detect anything with, so it gets the
+same text under an "if it's installed" sentence. Either way, you're never pointed at a skill that isn't there.
 
 ## A note on Codex
 
-Codex installs this repo as a plugin, straight from the same marketplace Claude Code uses,
-and gets the skills from it. What a Codex plugin **cannot** do is run hooks, so the
-SessionStart hook that injects the gate in Claude Code never fires there.
-`install.sh --codex` closes that gap: it writes the gate into `~/.codex/AGENTS.md`, always
-on, plus a pointer to each skill's file as a fallback for a Codex without the plugin.
-
-To update, refresh both halves:
+Codex reads this repo's Claude Code marketplace as it is, and the plugin works the same way
+there: the skills load from it, and its SessionStart hook injects the gate. Codex runs a
+plugin hook only after you trust it, and records that trust in `~/.codex/config.toml` under
+`[hooks.state]`. To update:
 
 ```sh
 codex plugin marketplace upgrade senior-dephx && codex plugin add senior-dephx@senior-dephx
-git -C ~/senior-dephx pull && ~/senior-dephx/install.sh --codex
 ```
+
+**Without plugin support**, `install.sh --codex` is the fallback: it writes the gate into
+`~/.codex/AGENTS.md`, always on, plus a pointer to each skill's file. Run it from a clone you
+keep, because those pointers are absolute paths into it. Use one install or the other, not
+both: with the plugin's hook trusted, the `AGENTS.md` block loads the gate a second time.
 
 The installer is idempotent and only rewrites its own delimited block, so the rest of your
 `AGENTS.md` survives.
@@ -289,8 +288,8 @@ rule, so what it must satisfy is narrow and non-negotiable. `test/smoke.sh` enfo
   the `stacks` folder, not the blueprint inside it. The skill is loaded nowhere and advertised
   to Codex nowhere.
 - **Its description gates it inside the first 150 characters.** The Codex `AGENTS.md` block
-  renders every description cut at exactly 150 chars (`${desc:0:150}…`), and that block is
-  always loaded, plugin or not. A gate clause after that point isn't merely missed: Codex
+  renders every description cut at exactly 150 chars (`${desc:0:150}…`), and for anyone on
+  that install the block is the only description Codex sees. A gate clause after that point isn't merely missed: Codex
   advertises the blueprint with its gate sliced off, which is worse than not shipping it.
 - **Its description states the do-not-autoload rule** — not just when to use it, but that it
   must never load for general work in that language, for another language, or on the agent's

@@ -7,7 +7,7 @@
 #
 #   Claude Code  native plugin  (skills auto-load by description; hook injects the gate)
 #   OpenCode     native plugin  (registers skills dir; injects the gate)
-#   Codex        plugin for the skills; AGENTS.md for the gate (Codex plugins run no hooks)
+#   Codex        native plugin  (same as Claude Code); --codex writes AGENTS.md as a fallback
 #
 set -euo pipefail
 
