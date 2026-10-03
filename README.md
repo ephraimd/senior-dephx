@@ -132,11 +132,12 @@ fix gets none of this, because process on a typo is its own kind of slop.
 Every other skill here is universal: it holds in any stack, and the agent learns your
 project's vocabulary by reading your repo. **A blueprint is the one thing that isn't.**
 
-`go-backend-blueprint` is one person's opinionated house style for a Go backend — concrete
-enough to build a service from, down to the library choices. Composition and lifecycle,
-background workers, the HTTP layer and its single response envelope, the data layer, and
-inter-service contracts: roughly 5,500 lines across an index and five reference files, read
-one at a time as you reach that layer.
+`go-backend-blueprint` is one person's opinionated house style for a Go backend, written
+down from services that already run in production: Gin and GORM, concrete enough to build
+a service from, down to the file names. Layout and naming, composition and graceful
+shutdown, background workers, the HTTP layer with its single response envelope and error
+contract, the data layer and its migrations, and inter-service clients: roughly 4,300 lines
+across an index and six reference files, read one at a time as you reach that layer.
 
 It has **two modes and no third**: *greenfield* (build a new service to this standard) and
 *full refactor* (bring an existing one to it). "Apply a bit of it while I'm in here" leaves

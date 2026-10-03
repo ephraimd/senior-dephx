@@ -1,571 +1,370 @@
 # The data layer
 
-Where SQL is allowed to exist, what happens when it explodes, and what a transaction
-is permitted to hold open.
+Where the database is opened, what a table looks like in Go, how a query is allowed to
+fail, what a transaction may hold open, and the one place the schema is allowed to
+change.
 
-The spine says layers do only their job and no package-level handle exists. This is
-the bottom layer: the only one that knows a driver is installed.
+The spine says one global handle, models in one place, every query scoped to its
+tenant, and migrations only from `cmd/migration`. This is the code that makes those
+true.
 
-## Queries live here and nowhere else
+## Queries live in the service, decisions are testable without one
 
-A `QueryRowContext` in a handler is a layer breach. So is one in a decision function.
-The rule is not tidiness.
+There is no repository layer in this house style. The service owns its queries: it
+calls `database.Db` through GORM, inside `SafeDBQuery`. A handler never imports
+`database`, and a helper never queries.
 
-```go
-// ✘ The rule and the query, welded together in the service.
-func (s *Service) Cancel(ctx context.Context, sc domain.Scope, id int64) error {
-	var status string
-	err := s.db.QueryRowContext(ctx,
-		`select status from orders where tenant_id = $1 and id = $2`,
-		sc.TenantID, id).Scan(&status)
-	if err != nil {
-		return err // and now sql.ErrNoRows is the client's problem
-	}
-	if status == "shipped" {
-		return domain.ErrForbidden
-	}
-	_, err = s.db.ExecContext(ctx,
-		`update orders set status = 'cancelled' where tenant_id = $1 and id = $2`,
-		sc.TenantID, id)
-	return err
-}
-```
-
-That costs three things, none of them aesthetic:
-
-- **The rule becomes untestable.** "You cannot cancel a shipped order" is one `if`.
-  Testing that one `if` now needs a live database, a schema, and a fixture. So the
-  test is slow; so the suite gets a `-short` flag; so the flag becomes the default on
-  every branch that is in a hurry; so the rule is untested. The rule did not get
-  harder to test - it got welded to something that is.
-- **The second caller forks it.** Admin bulk-cancel needs the same rule over a set of
-  ids, which is a different query, so it cannot call this function. It copies the
-  `if`. Now the rule exists twice, and when a third status becomes uncancellable only
-  one copy learns.
-- **The driver's error goes straight up.** `sql.ErrNoRows` is not a domain concept and
-  the layer above does not know what to do with it, so it does the wrong thing: a
-  missing order becomes a 500.
+What keeps that from welding every rule to a database is one habit: **a decision that
+needs no I/O is a pure function, and the service calls it.**
 
 ```go
-// ✔ The store queries. The rule decides. Neither knows the other's job.
-func (s *Service) Cancel(ctx context.Context, sc domain.Scope, id int64) error {
-	o, err := s.store.Find(ctx, sc, id)
-	if err != nil {
-		return err // already a domain error; see Translate below
-	}
-	if err := cancellable(o); err != nil {
+// ✘ The rule and the query in one method. Testing "you cannot remove a holiday that
+// has already passed" now needs a database, a schema and a fixture, so the test is
+// slow, so it gets skipped, so the rule is untested.
+func (s *HolidaysServiceImpl) RemoveHoliday(parentUserID, holidayID int) error {
+	var h model.UserHoliday
+	if err := database.Db.Scopes(helpers.TenantScope(parentUserID)).First(&h, holidayID).Error; err != nil {
 		return err
 	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		return s.store.Cancel(ctx, tx, sc, o.ID)
-	})
+	if h.HolidayDate.Before(time.Now().Truncate(24 * time.Hour)) {
+		return contracts.ErrHolidayInPast
+	}
+	...
 }
 
-// cancellable is the whole rule. It takes no dependencies, so its test is a table of
-// orders and expected errors that runs in a millisecond - which is why it gets run,
-// and why the bulk endpoint can call it too.
-func cancellable(o Order) error {
-	switch o.Status {
-	case StatusShipped, StatusRefunded:
-		return fmt.Errorf("%w: order is %s", domain.ErrForbidden, o.Status)
+// ✔ The rule takes no dependencies. Its test is a table of dates that runs in a
+// millisecond, and the bulk-delete endpoint can call it too instead of copying it.
+func removable(h model.UserHoliday, today time.Time) error {
+	if h.HolidayDate.Before(today) {
+		return contracts.WithDetail(contracts.ErrHolidayInPast, "%s has already passed", h.HolidayDate.Format(dateLayout))
 	}
 	return nil
 }
 ```
 
-```go
-// internal/order/store.go
-
-// The Go check is for the message. The where clause is for the truth.
-//
-// cancellable ran against a row the service read a moment ago. Between that read and
-// this update, the warehouse marked the order shipped. Without the predicate below
-// you cancel a shipped order and refund a parcel that is on a van. The predicate
-// makes the database the arbiter and RowsAffected the answer, and it costs nothing.
-func (s *Store) Cancel(ctx context.Context, db dbx.DB, sc domain.Scope, id int64) error {
-	if err := sc.Validate(); err != nil {
-		return err
-	}
-	return dbx.SafeDBQuery(ctx, "order.Cancel", func() error {
-		const q = `
-			update orders
-			   set status = 'cancelled', updated_at = now()
-			 where tenant_id = $1
-			   and id = $2
-			   and status not in ('shipped', 'refunded')`
-
-		res, err := db.ExecContext(ctx, q, sc.TenantID, id)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			// Zero rows is not success. Ignoring RowsAffected here is how an update
-			// that matched nothing returns nil and the caller reports "cancelled" for
-			// an order that shipped.
-			return fmt.Errorf("%w: order is no longer cancellable", domain.ErrConflict)
-		}
-		return nil
-	})
-}
-```
-
-The store takes `db dbx.DB` rather than reaching for its own handle, because this
-write has to be able to join a transaction its caller opened:
+## `pgsql.go`: one handle, opened once, closed by `main`
 
 ```go
-// internal/dbx/dbx.go
-package dbx
-
-// DB is what a store needs and nothing more. *sql.DB and *sql.Tx both satisfy it, so
-// one method serves the caller inside a transaction and the caller outside one.
-//
-// The alternative is Insert and InsertTx, which is two implementations of one
-// statement. They drift - one gains a column, the other does not - and the one that
-// silently opens its own transaction is the one somebody calls from inside another.
-type DB interface {
-	ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row
-}
-```
-
-**A store method takes a handle when it must be able to join a unit its caller
-opened. Otherwise it uses its own.** `Insert` takes one, because the order row and
-its outbox row are one fact. `ExpireOlderThan` does not, because it is the entire
-unit by itself and nothing else belongs in it.
-
-It takes the scope on the same terms as `Find` and `Cancel`, and for the same reason:
-a write into the wrong tenant is the read leak with a longer half-life.
-
-```go
-// internal/order/store.go
-
-// totalCents is a parameter for the same reason sc is. CreateOrder is what the client
-// asked for; the price is what this server decided, and the two do not belong in one
-// struct where the second can be left at zero. See PriceOf, below, for where it comes
-// from.
-func (s *Store) Insert(
-	ctx context.Context,
-	db dbx.DB,
-	sc domain.Scope,
-	in CreateOrder,
-	totalCents int64,
-) (Order, error) {
-	if err := sc.Validate(); err != nil {
-		return Order{}, err
-	}
-	var o Order
-	// The handle is db - the one the caller opened, not one this method went and
-	// found - so this row and the outbox row commit together or not at all.
-	err := dbx.SafeDBQuery(ctx, "order.Insert", func() error {
-		const q = `
-			insert into orders (tenant_id, customer_id, total_cents, status)
-			values ($1, $2, $3, $4)
-			returning id, tenant_id, customer_id, total_cents, status, created_at`
-		return scanOrder(
-			db.QueryRowContext(ctx, q, sc.TenantID, in.CustomerID, totalCents, "pending"),
-			&o,
-		)
-	})
-	return o, err
-}
-```
-
-### Where the price comes from
-
-`orders.total_cents` is `not null` with no default, so `Insert` cannot be written until
-somebody says what an order costs. **The server says.** The client sent a `SKU` and a
-`Qty`; what those are worth is a fact this service owns, and it reads it from the
-`products` table in the schema at the end of this file:
-
-```go
-// internal/order/store.go
-
-// PriceOf takes no handle: it is the whole unit by itself, and it runs before the
-// transaction opens rather than inside it. The total it produces is snapshotted onto
-// the order row, which is what makes a price change next week harmless to what a
-// customer was charged last week.
-func (s *Store) PriceOf(ctx context.Context, sc domain.Scope, sku string) (int64, error) {
-	if err := sc.Validate(); err != nil {
-		return 0, err
-	}
-	var cents int64
-	err := dbx.SafeDBQuery(ctx, "order.PriceOf", func() error {
-		const q = `
-			select unit_cents
-			  from products
-			 where tenant_id = $1 and sku = $2`
-		return s.db.QueryRowContext(ctx, q, sc.TenantID, sku).Scan(&cents)
-	})
-	return cents, err
-}
-```
-
-No `sql.ErrNoRows` leaves this method. `Translate` already turns it into
-`domain.ErrNotFound`, so an unknown SKU arrives at the service as a domain error and
-the store does not grow a second vocabulary for missing rows.
-
-## `SafeDBQuery`: a panic becomes an error
-
-Every query in this service goes through it. It runs the call, converts the driver's
-error into this service's vocabulary, and turns a panic into a returned error instead
-of letting it unwind.
-
-```go
-// internal/dbx/safe.go
-package dbx
+// database/pgsql.go
+package database
 
 import (
-	"context"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"example.com/users-service/internal/config"
+	"example.com/users-service/internal/contracts"
+	"example.com/users-service/pkg/logger"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+)
+
+// Db is one of the three process-wide handles. LoadDatabase assigns it once; nothing
+// reassigns it; CloseDatabase is called by main and by nothing else.
+var Db *gorm.DB
+
+func LoadDatabase() {
+	cfg := config.GlobalConfig
+
+	sslmode := "disable"
+	if cfg.Env == string(contracts.PROD) || cfg.Env == string(contracts.TEST) {
+		sslmode = "require"
+	}
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
+		cfg.DBHost, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBPort, sslmode)
+
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		DSN: dsn,
+		// Required when anything between this process and Postgres pools in
+		// transaction mode (PgBouncer, a managed pooler): the extended protocol's
+		// session-level prepared statements break there, intermittently, under load.
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{
+		// Unique violations come back as gorm.ErrDuplicatedKey and foreign-key
+		// violations as gorm.ErrForeignKeyViolated, so a service can map them to a
+		// sentinel with errors.Is instead of parsing SQLSTATE text.
+		TranslateError: true,
+		Logger: gormlogger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormlogger.Config{
+			SlowThreshold: 200 * time.Millisecond,
+			LogLevel:      gormLogLevel(cfg.Env),
+			// Bound values stay out of the slow-query and error logs. Without this, the
+			// log line for a slow login query carries the email and the password hash.
+			ParameterizedQueries: true,
+		}),
+	})
+	if err != nil {
+		// Panic, at boot, before anything listens. gorm.Open pings, so a wrong
+		// password fails the deploy here instead of a user's first request.
+		panic(fmt.Sprintf("Failed to connect to DB: %s", err))
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to get DB connection: %s", err))
+	}
+	sqlDB.SetMaxOpenConns(cfg.DBMaxConns)
+	sqlDB.SetMaxIdleConns(cfg.DBMaxConns / 2)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(2 * time.Minute)
+
+	Db = db
+	logger.Logger.Infof("database connected (sslmode=%s, max_conns=%d)", sslmode, cfg.DBMaxConns)
+}
+
+// CloseDatabase is called by main, last, after the server has drained and every
+// worker has stopped. This package never decides when that is: no signal handler,
+// no os.Exit. See references/composition-and-lifecycle.md.
+func CloseDatabase() {
+	if Db == nil {
+		return
+	}
+	sqlDB, err := Db.DB()
+	if err != nil {
+		logger.Logger.Errorf("close database: %v", err)
+		return
+	}
+	if err := sqlDB.Close(); err != nil {
+		logger.Logger.Errorf("close database: %v", err)
+	}
+}
+
+func gormLogLevel(env string) gormlogger.LogLevel {
+	switch env {
+	case string(contracts.PROD):
+		return gormlogger.Silent
+	case string(contracts.TEST):
+		return gormlogger.Error
+	default:
+		return gormlogger.Warn
+	}
+}
+```
+
+### The pool numbers are a share of a global budget
+
+Every number above has a default, and **a default pool is a number nobody chose that
+you discover under load.**
+
+- **`SetMaxOpenConns`. Default: unlimited.** Unlimited opens one connection per
+  concurrent query until the server's `max_connections` refuses the next one, and it
+  refuses it for every service on that cluster, including the psql session you were
+  about to open to find out why. `replicas x DBMaxConns`, summed over every service on
+  the cluster, has to fit under `max_connections` with room for the admin connection
+  you will need during the incident. Nobody owns that sum, which is why it is the one
+  that gets exceeded; write it down where the services' configs live.
+- **`SetMaxIdleConns`.** Below `MaxOpen` returns slots to a shared pooler between
+  bursts, at the price of a reconnect per burst. Equal to `MaxOpen` keeps a grown pool
+  grown. On a cluster many services share, returning slots wins; on a dedicated one,
+  keeping them does. Either is a choice; leaving the default (2) is not.
+- **`SetConnMaxLifetime`. Default: forever.** A connection that never dies outlives
+  every proxy and pooler in front of it. After a failover the pool still holds
+  connections to the old primary, now a replica, and every write fails until a
+  restart.
+- **`SetConnMaxIdleTime`.** Returns a burst's connections once the burst is over.
+
+## Models: the table, in Go, and nothing else
+
+```go
+// database/model/user_holiday.go
+package model
+
+import "time"
+
+const TableNameUserHoliday = "user_holidays"
+
+// UserHoliday is the row. It is not a DTO: it never goes on the wire in either
+// direction (references/layout-and-naming.md).
+type UserHoliday struct {
+	ID int `gorm:"column:id;primaryKey;autoIncrement:true" json:"id"`
+
+	// The tenant leads every index this table has. An index on (holiday_date) alone
+	// serves a tenant-scoped query by scanning other tenants' rows and discarding them:
+	// correct, and slower for every tenant as any one of them grows.
+	ParentUserID int `gorm:"column:parent_user_id;not null;uniqueIndex:uq_user_holidays_tenant_date,priority:1" json:"parent_user_id"`
+
+	HolidayDate time.Time `gorm:"column:holiday_date;type:date;not null;uniqueIndex:uq_user_holidays_tenant_date,priority:2" json:"holiday_date"`
+	Name        string    `gorm:"column:name;size:120;not null;default:''" json:"name"`
+	IsActive    bool      `gorm:"column:is_active;not null;default:true" json:"is_active"`
+	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (*UserHoliday) TableName() string { return TableNameUserHoliday }
+```
+
+The rules:
+
+- **Explicit `gorm:"column:..."` and `json:"..."` on every field.** GORM's naming
+  strategy is a function nobody reads; `column:` is the column, in the struct, where a
+  reviewer sees it. The `json` tag is for logs and debugging, not the wire.
+- **A `TableName` constant and a `TableName()` method.** The constant is what raw SQL
+  in `db_migrate.go` and a peer's shared model use, so the table's name has one
+  spelling.
+- **Tenancy columns on every tenant-owned table**: `parent_user_id`, and
+  `owner_account_id` where rows belong to an account within the tenant. A row that
+  cannot say which tenant it belongs to is a row the next reader has to guess about,
+  and a row that has travelled into a job payload or a cache has left the query that
+  scoped it.
+- **Every uniqueness rule the business has is a unique index here, led by the tenant.**
+  "One holiday per date per user" exists only if `uq_user_holidays_tenant_date` does.
+  An `if` in Go is not a constraint (see "Idempotent writes").
+- **Hard deletes by default.** A soft delete is a decision someone makes for a reason
+  (an audit duty, an undo), and when it is made the column is `gorm.DeletedAt`, never a
+  hand-rolled `*time.Time DeletedAt`. GORM scopes `gorm.DeletedAt` out of every query
+  automatically; a hand-rolled column has to be filtered with `deleted_at IS NULL` by
+  hand in every query, and the one that forgets serves deleted rows. Soft deletes also
+  turn every unique index into a partial one, and every upsert's conflict target with
+  it.
+
+## `SafeDBQuery`: a panic becomes an error, and the error is returned
+
+Every query goes through `SafeDBQuery`; every multi-statement write goes through
+`SafeDBTransaction`.
+
+```go
+// internal/helpers/db.helper.go
+package helpers
+
+import (
+	"errors"
 	"fmt"
 	"runtime/debug"
 
-	"example.internal/svc/internal/domain"
+	"example.com/users-service/pkg/logger"
+
+	"gorm.io/gorm"
 )
 
-// SafeDBQuery is the boundary between the driver's world and this service's. Above
-// this line nothing knows what a pgconn.PgError is, and nothing has to.
-//
-// op is the query's name and it is not decoration: it is the only thing the log has
-// to identify which of forty queries went wrong, because the stack above a recover
-// is gone and the SQL is not going in a log line.
-func SafeDBQuery(ctx context.Context, op string, fn func() error) (err error) {
+// SafeDBQuery turns a panic inside a query into a returned error instead of letting it
+// unwind past the caller. The named return is the whole mechanism: recover() alone
+// stops the unwind and returns zero values, so without the assignment a panicking
+// query returns a nil error and the caller carries on believing the write succeeded.
+func SafeDBQuery(action func() error) (err error) {
 	defer func() {
-		rec := recover()
-		if rec == nil {
-			return
+		if r := recover(); r != nil {
+			// The stack goes to the log now, because the frames it names are gone the
+			// moment this function returns.
+			logger.Logger.WithField("stack", string(debug.Stack())).Errorf("panic in database call: %v", r)
+			err = fmt.Errorf("internal database error: %v", r)
 		}
-		// The named return is the whole mechanism. recover() alone stops the unwind
-		// and the function returns its zero values - so without this assignment a
-		// panicking query returns a nil error, and the caller carries on believing
-		// the write succeeded. That is strictly worse than the panic was.
-		err = &PanicError{Op: op, Value: rec, Stack: debug.Stack()}
 	}()
-
-	return Translate(op, fn())
+	return action()
 }
 
-// PanicError is a recovered panic, converted. It satisfies
-// errors.Is(err, domain.ErrInternal), so the status map in
-// references/http-layer.md already answers 500 for it and never learns this type
-// exists.
-type PanicError struct {
-	Op    string
-	Value any
-	Stack []byte
+// SafeDBTransaction runs fn inside one transaction with the same panic guard. fn
+// receives tx and must use tx for every statement; see "Transactions".
+func SafeDBTransaction(db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	return SafeDBQuery(func() error { return db.Transaction(fn) })
 }
 
-// The stack is IN the message, not beside it. The frames it names are gone by the
-// time anything above the recover runs, and the two places in this service that log
-// an error - the request line in references/http-layer.md and runOnce in
-// references/background-work.md - both log err.Error(). A stack held in a field
-// nobody reads is a stack you did not capture.
-func (e *PanicError) Error() string {
-	return fmt.Sprintf("panic in %s: %v\n%s", e.Op, e.Value, e.Stack)
-}
-
-func (e *PanicError) Is(target error) bool { return target == domain.ErrInternal }
+func IsNotFound(err error) bool         { return errors.Is(err, gorm.ErrRecordNotFound) }
+func IsDuplicateKey(err error) bool     { return errors.Is(err, gorm.ErrDuplicatedKey) }
+func IsForeignKeyViolated(err error) bool { return errors.Is(err, gorm.ErrForeignKeyViolated) }
 ```
 
-**Why a query needs its own panic boundary when two recoveries already exist.** The
-HTTP layer recovers per request and the Worker recovers per tick. Both are backstops
-for the process, and both are too coarse to be the answer here.
+**Why a query needs its own panic boundary when Recovery already exists.** Recovery is
+per request; a worker's recover is per tick. Both are backstops for the process, and
+both are too coarse. A nil map in a row mapper on job 3 of 32 unwinds past the whole
+batch, so jobs 4 to 32 are never handled and the same poison row kills the same batch
+on the next tick. Inside `SafeDBQuery`, the panic is an error for job 3, which gets its
+retry, and the other 31 go through.
 
-`runOnce` recovers around a whole *batch*. A nil map in a row scanner on message 3 of
-32 unwinds past `handleOne`, so messages 4 through 32 are never handled: not acked,
-not retried, not dead-lettered. They sit in `state = 'running'` until the stale-claim
-reaper returns them, minutes later, and the same poison message kills the same batch
-again. One bad row stops the queue. With `SafeDBQuery`, the panic is an error inside
-`handleOne`, message 3 gets its retry and eventually its dead-letter entry, and the
-other 31 go through.
-
-A panic here is not exotic. A nil pointer in a scan helper, a slice index in a row
-mapper, a driver bug on a malformed value - each is a normal bug, and none of them
-deserve to be an outage.
-
-### What SafeDBQuery is not
-
-It is not a way to ignore errors. "Safe" is about the panic and only about the panic.
+**"Safe" is about the panic and only the panic.** Every call site returns its error.
 
 ```go
 // ✘ The name said safe.
-func (s *Store) Find(ctx context.Context, sc domain.Scope, id int64) Order {
-	var o Order
-	dbx.SafeDBQuery(ctx, "order.Find", func() error {
-		return scanOrder(s.db.QueryRowContext(ctx, findQ, sc.TenantID, id), &o)
-	})
-	return o
-}
+var h model.UserHoliday
+helpers.SafeDBQuery(func() error {
+	return database.Db.Scopes(helpers.TenantScope(parentUserID)).First(&h, id).Error
+})
+return toHolidayResponseDTO(h) // id 0, date 0001-01-01, on a timeout, a miss, or a panic
 ```
 
-That returns `Order{}` - id 0, tenant 0, total 0, status "" - on a connection reset,
-a timeout, a missing row, and a panic, and the caller has no way to tell any of them
-from an order that genuinely costs nothing. The 500 you did not raise becomes a
-receipt for zero dollars and a shipped parcel. **Every `SafeDBQuery` call site
-returns its error.** If a linter can enforce one thing in this repo, enforce that.
+That returns a zero holiday on a connection reset, a missing row, and a panic, and the
+caller cannot tell any of them from a real row. If a linter can enforce one thing in
+this repo, enforce that a `SafeDBQuery` result is never discarded.
+
+### Driver errors become sentinels, in the service, once
+
+`gorm.ErrRecordNotFound` is not a domain concept, and the layer above does not know
+what to do with it. The service translates at the call that produced it:
 
 ```go
-// ✔
-func (s *Store) Find(ctx context.Context, sc domain.Scope, id int64) (Order, error) {
-	if err := sc.Validate(); err != nil {
-		return Order{}, err
-	}
-	var o Order
-	err := dbx.SafeDBQuery(ctx, "order.Find", func() error {
-		const q = `
-			select id, tenant_id, customer_id, total_cents, status, created_at
-			  from orders
-			 where tenant_id = $1 and id = $2`
-		return scanOrder(s.db.QueryRowContext(ctx, q, sc.TenantID, id), &o)
+func (s *HolidaysServiceImpl) GetHoliday(parentUserID, holidayID int) (model.UserHoliday, error) {
+	var h model.UserHoliday
+	err := helpers.SafeDBQuery(func() error {
+		return database.Db.Scopes(helpers.TenantScope(parentUserID)).First(&h, holidayID).Error
 	})
-	return o, err
-}
-```
-
-It also does not log. That is deliberate twice over. A store is constructed
-`NewStore(db)` and holds no logger, because state a constructor does not name is
-state a test cannot replace. And this service already has exactly one place per entry
-point that logs a failure - the request line, and `runOnce`. A log call here would
-emit a second line for every failure those two already report, and a doubled error
-count is an error count nobody can alert on. The panic still reaches the log with its
-op and its full stack, because `SafeDBQuery` put both in the error at the only moment
-either still existed.
-
-### Driver errors become domain errors, here, once
-
-This is the translation that makes file `references/http-layer.md`'s single status
-map possible. Without it, "not found" is a driver sentinel that every handler has to
-recognise separately, and a unique violation is a 500.
-
-```go
-// internal/dbx/errors.go
-package dbx
-
-import (
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-
-	"github.com/jackc/pgx/v5/pgconn"
-
-	"example.internal/svc/internal/domain"
-)
-
-// Translate is the ONLY function in this service that knows a driver exists. That is
-// the point: grep for pgconn and you get this file, so swapping a driver is a change
-// to one function rather than an archaeology project across forty handlers.
-func Translate(op string, err error) error {
-	if err == nil {
-		return nil
-	}
-
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		// The single most common one. A store that leaks sql.ErrNoRows upwards makes
-		// every caller import database/sql to ask "did it exist" - and the one that
-		// forgets returns a 500 for a typo in a URL.
-		return fmt.Errorf("%s: %w", op, domain.ErrNotFound)
-
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// Not a database failure. The client hung up, or shutdown started. Classifying
-		// it as internal pages you for every deploy and for every user who closed a
-		// tab, and then nobody reads the page.
-		return fmt.Errorf("%s: %w", op, err)
+	case err == nil:
+		return h, nil
+	case helpers.IsNotFound(err):
+		// Another tenant's id lands here too, which is the point: the client gets the
+		// same 404 for "does not exist" and "is not yours" (references/http-layer.md).
+		return model.UserHoliday{}, fmt.Errorf("get holiday %d: %w", holidayID, contracts.ErrHolidayNotFound)
+	default:
+		// Unclassified: RespondServiceError makes it a 500 with a reference, and the
+		// driver's text stays in the log.
+		return model.UserHoliday{}, fmt.Errorf("get holiday %d: %w", holidayID, err)
 	}
-
-	var pg *pgconn.PgError
-	if errors.As(err, &pg) {
-		switch pg.Code {
-		case "23505": // unique_violation
-			// The constraint name goes in the message, which goes to the log. It does
-			// NOT go to the client: statusFor returns a fixed string for ErrConflict,
-			// which is what stops "users_tenant_id_email_key" from telling an
-			// attacker your table name, your uniqueness rule, and that the address
-			// they guessed is registered.
-			return fmt.Errorf("%s: %w (constraint %s)", op, domain.ErrConflict, pg.ConstraintName)
-
-		case "23503": // foreign_key_violation
-			return fmt.Errorf("%s: %w (constraint %s)", op, domain.ErrConflict, pg.ConstraintName)
-
-		case "23502", "23514": // not_null_violation, check_violation
-			// The database caught what a DTO should have. It is a 400, because the
-			// request was wrong - and it is also a hole in Validate, and this log line
-			// is how you find out which field.
-			return fmt.Errorf("%s: %w (%s on %s)", op, domain.ErrInvalid, pg.Code, pg.ColumnName)
-
-		case "40001", "40P01": // serialization_failure, deadlock_detected
-			// Retryable, and only the caller knows whether retrying is safe. 503 says
-			// "try again" to a client that can, and the log says which query is
-			// fighting which.
-			return fmt.Errorf("%s: %w (%s)", op, domain.ErrUnavailable, pg.Code)
-
-		case "57014": // query_canceled, which is what a statement_timeout looks like
-			return fmt.Errorf("%s: %w (statement timeout)", op, domain.ErrUnavailable)
-		}
-	}
-
-	// Unclassified is internal. The driver's own text is wrapped in, so the log has
-	// everything; the client gets statusFor's fixed "internal error" and learns
-	// nothing about your schema.
-	return fmt.Errorf("%s: %w: %v", op, domain.ErrInternal, err)
 }
 ```
 
-Every code above is a decision someone has to make once. Leaving them unmapped is
-also a decision: it makes all of them 500s, so a duplicate email pages you at 3am
-with the same severity as a dead primary.
+- `gorm.ErrRecordNotFound` becomes the resource's `NotFound` sentinel.
+- `gorm.ErrDuplicatedKey` becomes the resource's `Conflict` sentinel, when the
+  duplicate is something the user did. The constraint name goes in the `%w` context
+  for the log; it never reaches the client.
+- Everything else is wrapped with context and returned. It is a 500, and it should be.
 
-## Transactions: `s.tx`
-
-**A transaction is a decision-layer concern with a data-layer helper.** The question
-it answers - which facts must become true together, or not at all - is a business
-question. The store sees one table and cannot answer it. So `tx` is an unexported
-method on the service, and the store never begins one.
+## Transactions: one function, one handle
 
 ```go
-// internal/order/service.go
-package order
-
-type Service struct {
-	db    *sql.DB
-	store *Store
-	users *user.Store
-	mail  *mailer.Client
-	jobs  *worker.PgQueue
-	log   *slog.Logger
-}
-
-func NewService(
-	db *sql.DB,
-	store *Store,
-	users *user.Store,
-	mail *mailer.Client,
-	jobs *worker.PgQueue,
-	log *slog.Logger,
-) *Service {
-	return &Service{db: db, store: store, users: users, mail: mail, jobs: jobs, log: log}
-}
-
-// tx begins, defers rollback, runs fn, commits. It is four moves and it is the only
-// place in this feature that names BeginTx, so there is exactly one rollback policy
-// and exactly one place to add a retry on serialization_failure later.
-func (s *Service) tx(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+// ✔ Both rows, or neither.
+err := helpers.SafeDBTransaction(database.Db, func(tx *gorm.DB) error {
+	if err := tx.Create(&stage).Error; err != nil {
+		return fmt.Errorf("create stage: %w", err)
 	}
-
-	// Unconditional, and deferred. After a successful Commit this returns
-	// sql.ErrTxDone and does nothing, which is exactly right. The version guarded by
-	// `if err != nil { tx.Rollback() }` misses two paths: the early return somebody
-	// adds to fn next year, and the panic - and a panic that unwinds past an open
-	// transaction leaves it holding its locks until the connection is reaped.
-	defer func() {
-		if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) {
-			// Logged, not returned. err already names the real failure; replacing it
-			// with the rollback's failure hides the cause behind its consequence.
-			s.log.Error("rollback failed", "err", rerr)
-		}
-	}()
-
-	if err := fn(tx); err != nil {
-		return err // already a domain error: fn's callees went through SafeDBQuery
-	}
-	// Commit is a write and it can fail on its own - a deadlock, a lost connection,
-	// a disk. A tx helper that ignores this return reports success for a transaction
-	// that rolled back, which is the most expensive lie in this file.
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	action.StageID = stage.ID
+	if err := tx.Create(&action).Error; err != nil {
+		return fmt.Errorf("create stage action: %w", err)
 	}
 	return nil
-}
-```
-
-Used, with the store taking the handle it was given:
-
-```go
-func (s *Service) Create(
-	ctx context.Context,
-	sc domain.Scope,
-	in CreateOrder,
-) (Order, error) {
-	// Priced before the transaction opens, because the catalog read is not part of
-	// the unit the order row belongs to and holding a transaction across it buys
-	// nothing.
-	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			// The SKU came off the wire, so its absence is a bad request. Passing
-			// ErrNotFound up 404s the POST and sends the caller hunting for an order
-			// that was never created.
-			return Order{}, fmt.Errorf("%w: unknown sku %q", domain.ErrInvalid, in.SKU)
-		}
-		return Order{}, err
-	}
-	totalCents := unit * int64(in.Qty)
-
-	var out Order
-	err = s.tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		out, err = s.store.Insert(ctx, tx, sc, in, totalCents)
-		return err
-	})
-	if err != nil {
-		return Order{}, err
-	}
-	return out, nil
-}
-```
-
-`fn` writes to a variable in the enclosing scope rather than returning a value,
-because `tx` has to be able to run `fn` and then fail at `Commit`. If `tx` returned
-`fn`'s value, a caller would have a fully-populated `Order` and a commit error at the
-same time, and one of the two would get used.
-
-### Nothing that can be slow goes inside one
-
-**No network call. No queue publish to another system. No third-party API. No
-`time.Sleep`.** Not "avoid where practical" - none.
-
-```go
-// ✘
-err := s.tx(ctx, func(tx *sql.Tx) error {
-	out, err := s.store.Insert(ctx, tx, sc, in, totalCents)
-	if err != nil {
-		return err
-	}
-	// Typed and scoped, because out is the storage model: hand that to a peer and you
-	// have published every column anyone adds to Order later. The mailer's own
-	// ReceiptRequest is what stops it (references/composition-and-lifecycle.md).
-	return s.mail.SendReceipt(ctx, sc, mailer.ReceiptRequest{ // 10s, someone else's
-		OrderID:    out.ID,
-		CustomerID: out.CustomerID,
-		TotalCents: out.TotalCents,
-	})
 })
 ```
 
-Trace it when the mailer is having a bad afternoon. Each request holds one pooled
-connection and one open transaction for ten seconds. `openDB` set
-`SetMaxOpenConns(cfg.MaxDBConns)`, so at twenty concurrent creates the pool is empty
-and **every other endpoint in the service blocks on `BeginTx`** - including the ones
-that never touch orders, never touch the mailer, and were working perfectly. You have
-imported a third party's outage and amplified it into a total one.
+**Inside the callback, every statement uses `tx`. `database.Db` inside a transaction
+callback is a bug**, and the most common one this layer has: the statement runs on a
+different pooled connection, outside the transaction, commits on its own immediately,
+and is not rolled back when the transaction fails. It also needs a second connection
+while the first is held, so under load the transaction waits on a pool it is itself
+exhausting.
 
-That is only the first half. Each of those transactions holds its row locks for ten
-seconds, so concurrent writers to the same order queue behind it. And each sits
-`idle in transaction`, which pins the database's oldest running transaction, which
-stops autovacuum from cleaning up dead tuples anywhere in the database. A slow mailer
-becomes table bloat on tables it has never heard of.
+A helper or a service method that must be able to join a caller's transaction takes
+the handle as a parameter, `db *gorm.DB`, and the caller passes `tx` or `database.Db`.
+One method then serves both callers; the alternative is `Create` and `CreateTx`, two
+copies of one statement that drift.
 
-The two correct shapes are the outbox and start-after-commit. Both are in
-`references/background-work.md`; the rule they encode is that the only thing allowed
-inside a transaction is more of the same database.
+### Nothing that can be slow goes inside one
+
+**No network call. No call to a peer service. No vendor API. No Redis enqueue. No
+`time.Sleep`.** Not "avoid where practical": none.
+
+Trace it when the peer is having a bad afternoon. Each request holds one pooled
+connection and one open transaction for ten seconds. At `DBMaxConns` concurrent
+requests the pool is empty, and **every other endpoint in the service blocks waiting
+for a connection**, including the ones that never touch that peer. A third party's
+outage is now yours, amplified. Each of those transactions also holds its row locks
+and sits `idle in transaction`, which stops autovacuum cleaning dead rows anywhere in
+the database.
+
+The two correct shapes are: commit, then do the slow thing (Pattern A in
+`references/background-work.md`); or write a row the slow thing will pick up, in the
+same transaction (Patterns B and C). The only thing allowed inside a transaction is
+more of the same database.
 
 ## Idempotent writes
 
@@ -573,529 +372,437 @@ inside a transaction is more of the same database.
 
 ```go
 // ✘ Correct in a single-threaded test. Wrong the moment there are two of anything.
-func (s *Store) EnsureCustomer(
-	ctx context.Context,
-	db dbx.DB,
-	sc domain.Scope,
-	email, name string,
-) (int64, error) {
-	var id int64
-	err := db.QueryRowContext(ctx,
-		`select id from customers where tenant_id = $1 and lower(email) = lower($2)`,
-		sc.TenantID, email).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
-	}
-	// The window is right here, and it is wide enough. The other replica ran the same
-	// select against the same rows and also got no rows, because the row does not
-	// exist yet for either of you. Both of you now insert.
-	return 0, db.QueryRowContext(ctx,
-		`insert into customers (tenant_id, email, name) values ($1, $2, $3) returning id`,
-		sc.TenantID, email, name).Scan(&id)
+var existing model.UserHoliday
+err := database.Db.Where("parent_user_id = ? AND holiday_date = ?", uid, d).First(&existing).Error
+if err == nil {
+	return existing, nil
 }
+// The window is right here. A retried request, a double-click, a second replica: both
+// ran the same select, both got no row, both insert.
+return holiday, database.Db.Create(&holiday).Error
 ```
 
-The window does not need replicas. Two goroutines in one process is enough, and a
-retried request is enough: the client's first attempt timed out at the load balancer
-while the insert was still running, so the retry arrives while attempt one is between
-its select and its insert. This is not a rare interleaving - it is what a retry
-storm is made of, and a retry storm is exactly when it happens.
-
-What happens next depends entirely on whether the constraint exists:
-
-- **With a unique index**, one insert wins and the other gets `23505`, which
-  `Translate` turns into `ErrConflict` and the client sees a 409 for a request that
-  should have succeeded. Annoying, recoverable, visible.
-- **Without one**, both succeed. You now have two customers with the same email in
-  the same tenant, forever. Every `QueryRow` that expects one row gets an arbitrary
-  one of the two. Half the orders attach to the first, half to the second. Nothing
-  errors, nothing logs, and you find out when a report disagrees with itself.
-
-```sql
--- The correctness boundary. Not the Go code above it.
---
--- lower(email) is in the index because the uniqueness rule is case-insensitive. A
--- plain unique on (tenant_id, email) lets Alice@ and alice@ both exist, and then
--- your login is a coin flip.
-create unique index customers_tenant_email
-    on customers (tenant_id, lower(email));
-```
+The window does not need replicas. A client whose first attempt timed out at the load
+balancer while the insert was still running sends its retry straight into it. With a
+unique index, one insert wins and the other gets `ErrDuplicatedKey`; without one, both
+succeed, and the user has two holidays on one date forever, half of every report
+counting one and half the other.
 
 ```go
-// ✔ One statement. One round trip. No window to lose.
-func (s *Store) EnsureCustomer(
-	ctx context.Context,
-	db dbx.DB,
-	sc domain.Scope,
-	email, name string,
-) (int64, error) {
-	if err := sc.Validate(); err != nil {
-		return 0, err
-	}
-	var id int64
-	err := dbx.SafeDBQuery(ctx, "customer.Ensure", func() error {
-		// The conflict target must match a real unique index, expression and all. It
-		// is not a hint: Postgres answers a mismatch with "there is no unique or
-		// exclusion constraint matching the ON CONFLICT specification", at runtime,
-		// on the first duplicate - which is the first time anyone runs this path
-		// twice, which is production.
-		const q = `
-			insert into customers (tenant_id, email, name, updated_at)
-			values ($1, $2, $3, now())
-			on conflict (tenant_id, lower(email)) do update
-			   set name = excluded.name,
-			       updated_at = now()
-			returning id`
-
-		return db.QueryRowContext(ctx, q, sc.TenantID, email, name).Scan(&id)
-	})
-	return id, err
-}
-```
-
-**`do update`, not `do nothing`.** `on conflict do nothing returning id` returns no
-row when it conflicts, so `Scan` gives you `sql.ErrNoRows`, which `Translate` turns
-into `ErrNotFound` - a 404 for a row that definitely exists, on the exact path the
-upsert was written to handle. If there is genuinely nothing to update, update
-something inert: `do update set updated_at = excluded.updated_at`. The row comes back
-and the bug never gets written.
-
-**The constraint is the correctness boundary; the application check is an
-optimisation.** A `select` before an `insert` is allowed - it saves a round trip on
-the common path, it produces a better error message, it is fine. What it is not is a
-guarantee. Two processes can both pass any check written in Go, and the only thing
-that has ever stopped them is a unique index. If the invariant matters and there is
-no constraint for it, the invariant does not exist yet. Write the index first.
-
-The same shape covers at-least-once delivery: `references/background-work.md` makes
-every consumer's handler idempotent because the ack is a separate write from the
-work. `on conflict do update` is how a handler that runs twice produces one row.
-
-## One migration mechanism, and one place that runs it
-
-**Two mechanisms is two truths about the schema.** A tool for tables and a hand-run
-psql script for indexes means the answer to "what is the schema" is a merge of two
-sources, and the merge only exists in one person's head. Auto-creating tables from
-struct tags *plus* a file of SQL for the things the tags could not express is the
-same failure wearing a nicer hat: the tags win on some columns, the SQL wins on
-others, and nobody can tell you which without running it.
-
-**And it runs in exactly one place: a separate command, once per deploy, before any
-replica boots.**
-
-```go
-// cmd/migrate/main.go
-package main
-
-// A second binary in the same image. Same code, same schema files, same version -
-// which is what makes "the migration that ran" and "the code that is running" the
-// same commit, provably, instead of by convention.
-func main() {
-	if err := run(); err != nil {
-		slog.Error("migrate failed", "err", err)
-		os.Exit(1) // the deploy stops here, before a single replica starts
-	}
-}
-
-func run() error {
-	cfg := config.Load()
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+// ✔ One statement. The unique index is the arbiter; there is no window to lose.
+func (s *HolidaysServiceImpl) AddHoliday(
+	parentUserID int,
+	input holidaysresource_dto.CreateHolidayDTO,
+) (model.UserHoliday, error) {
+	date, err := parseHolidayDate(input.HolidayDate) // returns a contracts.InvalidFields on garbage
 	if err != nil {
-		return err
+		return model.UserHoliday{}, err
 	}
-	defer db.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	return migrate.Up(ctx, db, log)
+	holiday := model.UserHoliday{
+		ParentUserID: parentUserID,
+		HolidayDate:  date,
+		Name:         input.Name,
+		IsActive:     true,
+	}
+	err = helpers.SafeDBQuery(func() error {
+		return database.Db.Clauses(clause.OnConflict{
+			// Must match a real unique index, column for column. It is not a hint:
+			// Postgres answers a mismatch at runtime, on the first duplicate, which is
+			// the first time anyone runs this path twice, which is production.
+			Columns:   []clause.Column{{Name: "parent_user_id"}, {Name: "holiday_date"}},
+			DoUpdates: clause.AssignmentColumns([]string{"name", "is_active", "updated_at"}),
+		}).Create(&holiday).Error
+	})
+	if err != nil {
+		return model.UserHoliday{}, fmt.Errorf("add holiday: %w", err)
+	}
+	return holiday, nil
 }
 ```
 
-### What every-replica-migrates costs
-
-Calling `migrate.Up` from `run` looks tidy and free. It is neither.
-
-- **Ten replicas roll at once and ten processes migrate.** The first takes an
-  `ACCESS EXCLUSIVE` lock for its `alter table`. The other nine block on it - not on
-  the lock they will need later, on this one, right now - so nine replicas sit past
-  their startup probe deadline, get killed, restart, and block again. The rollout
-  stalls and the logs say nothing except that the pods are not ready.
-- **The one that loses the race crashes.** Whichever replica applies
-  `create index ... ` second gets "already exists", `run` returns an error, `main`
-  exits 1, and the orchestrator restarts it into the same error. That is a crash
-  loop caused by a migration that succeeded.
-- **A failed migration takes the service with it.** The schema change was wrong;
-  every replica now refuses to boot. Without the split, you have no running service
-  and a schema in an unknown state. With it, the migration job fails, the old
-  replicas keep serving the old schema, and the deploy never started.
-- **Nothing can be gated on it.** A separate command has an exit code the deploy can
-  wait for. A migration inside `run` completes at some point during the rollout,
-  which means the new code is live against the old schema for a window nobody
-  measured.
-
-### The runner
+- **`DoUpdates`, not `DoNothing`.** `ON CONFLICT DO NOTHING` returns no row on a
+  conflict, so the struct comes back with `ID` 0 and the handler returns a holiday that
+  does not exist. If there is genuinely nothing to update, update something inert
+  (`updated_at`) so the row comes back.
+- **The constraint is the correctness boundary; a Go check is an optimisation.** A
+  `First` before a `Create` is allowed, for a better message on the common path. It is
+  not a guarantee. If the invariant matters and there is no unique index for it, the
+  invariant does not exist yet. Write the index first, in the model's tags or in
+  `db_migrate.go`.
+- **Check `RowsAffected` where zero is a failure.** An `Update` or `Delete` that
+  matched nothing returns `nil`; ignoring `RowsAffected` reports "removed" for a
+  holiday that never existed or belongs to someone else.
 
 ```go
-// internal/migrate/migrate.go
-package migrate
+res := database.Db.Scopes(helpers.TenantScope(parentUserID)).Delete(&model.UserHoliday{}, holidayID)
+if res.Error != nil {
+	return fmt.Errorf("remove holiday %d: %w", holidayID, res.Error)
+}
+if res.RowsAffected == 0 {
+	return fmt.Errorf("remove holiday %d: %w", holidayID, contracts.ErrHolidayNotFound)
+}
+```
+
+## Migrations run in one function, from one command, before the deploy
+
+**One function holds every schema change, in one order.** `database.MigrateDB` does
+three things, always in this sequence:
+
+1. **Renames and other changes AutoMigrate cannot infer**, first. AutoMigrate compares
+   struct tags to the live schema and adds what is missing; it does not detect a
+   rename. Rename a field's column tag without a prior `RenameColumn` and AutoMigrate
+   adds an empty new column beside the old one, and the data stays behind in a column
+   nothing reads.
+2. **`AutoMigrate` over every model this service owns.**
+3. **Idempotent raw SQL** for what struct tags cannot express: partial indexes,
+   expression indexes, check constraints, a `CONCURRENTLY` build. Every statement is
+   `IF NOT EXISTS` / `IF EXISTS`, and every one's error is checked.
+
+That is one mechanism: one function, one order, one place to read. Two mechanisms (a
+tool for tables plus a hand-run psql script for indexes) is two truths about the
+schema, and the merge of them exists only in one person's head.
+
+```go
+// database/db_migrate.go
+package database
 
 import (
-	"context"
-	"database/sql"
-	"embed"
 	"fmt"
-	"io/fs"
-	"log/slog"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
+
+	"example.com/users-service/database/model"
+	"example.com/users-service/pkg/logger"
+
+	"gorm.io/gorm"
 )
 
-// Embedded, not read from disk. A migration directory that is not in the binary is a
-// file that can be missing from the image, and you find that out during the deploy
-// it was needed for.
-//
-//go:embed sql/*.sql
-var files embed.FS
-
-// Up applies every file that is not in the ledger, in name order, and does nothing
-// else. It is called from cmd/migrate and from nowhere else: not from run, not from
-// an init, not from a test helper that "just needs the schema".
-func Up(ctx context.Context, db *sql.DB, log *slog.Logger) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("conn: %w", err)
-	}
-	defer conn.Close()
-
-	// Blocking, unlike the try-lock in references/background-work.md - and the
-	// difference is the point. There, a second replica has nothing to add and should
-	// leave. Here it has to wait: the deploy is gated on this process's exit code, so
-	// exiting 0 without the migration applied is a lie the rollout believes.
-	//
-	// The deploy is supposed to run this once. "Supposed to" is not a mechanism.
-	const lockID = 823144115
-	if _, err := conn.ExecContext(ctx, `select pg_advisory_lock($1)`, lockID); err != nil {
-		return fmt.Errorf("lock: %w", err)
-	}
-	defer func() {
-		uctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := conn.ExecContext(uctx, `select pg_advisory_unlock($1)`, lockID); err != nil {
-			log.Error("advisory unlock failed", "err", err)
+// MigrateDB is called from cmd/migration and from nowhere else: not from main, not
+// behind an env flag, not from a test helper that "just needs the schema".
+func MigrateDB(db *gorm.DB) error {
+	// 1. Renames. Each guarded, so the second run is a no-op.
+	if db.Migrator().HasColumn(&model.CrmConfig{}, "legacy_field_key") &&
+		!db.Migrator().HasColumn(&model.CrmConfig{}, "crm_field_key") {
+		if err := db.Migrator().RenameColumn(&model.CrmConfig{}, "legacy_field_key", "crm_field_key"); err != nil {
+			return fmt.Errorf("rename crm_configs.legacy_field_key: %w", err)
 		}
-	}()
-
-	if _, err := conn.ExecContext(ctx, `
-		create table if not exists schema_migrations (
-		    version    text        primary key,
-		    applied_at timestamptz not null default now()
-		)`); err != nil {
-		return fmt.Errorf("ensure ledger: %w", err)
 	}
 
-	applied, err := ledger(ctx, conn)
-	if err != nil {
-		return err
+	// 2. Tables and columns. Every model THIS service owns, and only those.
+	if err := db.AutoMigrate(
+		&model.Country{}, // reference data; database_seed fills it
+		&model.User{},
+		&model.Account{}, // after User: it references users
+		&model.UserHoliday{},
+		&model.CrmConfig{},
+	); err != nil {
+		return fmt.Errorf("automigrate: %w", err)
 	}
 
-	names, err := fs.Glob(files, "sql/*.sql")
-	if err != nil {
-		return err
+	// 3. What tags cannot say. Each statement idempotent, each error checked: a
+	// migration whose Exec error is dropped reports success for an index that does not
+	// exist, and the first sign is a full scan in production.
+	statements := []struct{ name, sql string }{
+		{"uq_crm_configs_oauth_portal", `
+			CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_configs_oauth_portal
+			    ON crm_configs (oauth_portal_id)
+			 WHERE oauth_portal_id IS NOT NULL`},
+		{"ck_user_holidays_name_len", `
+			DO $$ BEGIN
+			    ALTER TABLE user_holidays ADD CONSTRAINT ck_user_holidays_name_len CHECK (char_length(name) <= 120);
+			EXCEPTION WHEN duplicate_object THEN NULL;
+			END $$`},
 	}
-	// Lexical order IS the order, which is why every file is 0001_, 0002_,
-	// zero-padded. A timestamp prefix orders by whichever laptop's clock produced it,
-	// so two branches that merge cleanly apply in an order neither author intended -
-	// and it works on their machines, where each one applied alone.
-	sort.Strings(names)
-
-	for _, name := range names {
-		version := filepath.Base(name)
-		if applied[version] {
-			continue
+	for _, st := range statements {
+		if err := db.Exec(st.sql).Error; err != nil {
+			return fmt.Errorf("migration %s: %w", st.name, err)
 		}
-		body, err := files.ReadFile(name)
-		if err != nil {
-			return err
-		}
+	}
 
-		if strings.HasSuffix(version, ".notx.sql") {
-			err = applyNoTx(ctx, conn, version, string(body))
-		} else {
-			err = applyTx(ctx, conn, version, string(body))
-		}
-		if err != nil {
-			return err
-		}
-		log.Info("migration applied", "version", version)
-	}
-	return nil
-}
-
-func ledger(ctx context.Context, conn *sql.Conn) (map[string]bool, error) {
-	rows, err := conn.QueryContext(ctx, `select version from schema_migrations`)
-	if err != nil {
-		return nil, fmt.Errorf("read ledger: %w", err)
-	}
-	defer rows.Close()
-
-	applied := map[string]bool{}
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		applied[v] = true
-	}
-	return applied, rows.Err()
-}
-
-// applyTx puts the migration and its ledger row in ONE transaction. They commit
-// together or neither does. A migration that ran but was not recorded runs again on
-// the next deploy, and the second `alter table ... add column` fails, and now the
-// deploy is wedged on a migration that already succeeded and a human has to hand-edit
-// a ledger at 2am.
-func applyTx(ctx context.Context, conn *sql.Conn, version, body string) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, body); err != nil {
-		return fmt.Errorf("apply %s: %w", version, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`insert into schema_migrations (version) values ($1)`, version); err != nil {
-		return fmt.Errorf("record %s: %w", version, err)
-	}
-	return tx.Commit()
-}
-
-// A *.notx.sql file runs outside a transaction, because some statements cannot run
-// inside one: `create index concurrently` fails with "CREATE INDEX CONCURRENTLY
-// cannot run inside a transaction block", and a plain `create index` on a large hot
-// table locks out writes for the whole build.
-//
-// This is still ONE mechanism - one ledger, one runner, one order, one suffix. A
-// second tool for concurrent indexes would be a second truth about the schema.
-//
-// The cost is real and it is the price of the concurrency: nothing rolls back. Keep
-// these files to a single statement, so "failed halfway" cannot happen, and a
-// concurrent index that fails leaves an INVALID index you drop and retry.
-func applyNoTx(ctx context.Context, conn *sql.Conn, version, body string) error {
-	if _, err := conn.ExecContext(ctx, body); err != nil {
-		return fmt.Errorf("apply %s: %w", version, err)
-	}
-	if _, err := conn.ExecContext(ctx,
-		`insert into schema_migrations (version) values ($1)`, version); err != nil {
-		return fmt.Errorf("record %s: %w", version, err)
-	}
+	logger.Logger.Info("migrations applied")
 	return nil
 }
 ```
 
+### `cmd/migration` is the only thing that runs it
+
+```go
+// cmd/migration/migrate.go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"example.com/users-service/database"
+	"example.com/users-service/database/database_seed"
+	"example.com/users-service/internal/config"
+	"example.com/users-service/pkg/logger"
+
+	"gorm.io/gorm"
+)
+
+// A second binary in the same image. Same code, same models, same commit - which is
+// what makes "the migration that ran" and "the code about to run" the same version,
+// provably, instead of by convention. The deploy runs it as a one-off job and starts
+// the new replicas only if it exits 0.
+func main() {
+	config.LoadConfig()
+	database.LoadDatabase()
+
+	err := migrate()
+	database.CloseDatabase()
+	if err != nil {
+		logger.Logger.Errorf("migration failed: %v", err)
+		os.Exit(1) // the deploy stops here, before a single new replica starts
+	}
+	logger.Logger.Info("migration complete")
+}
+
+// migrationLockID is any constant, fixed forever, shared by nothing else.
+const migrationLockID = 823144115
+
+func migrate() error {
+	// One connection for the whole run, so the advisory lock and the work share a
+	// session. The deploy is supposed to run this job once; "supposed to" is not a
+	// mechanism, and two concurrent runs racing the same ALTER TABLE is the failure
+	// this whole command exists to prevent.
+	return database.Db.Connection(func(conn *gorm.DB) error {
+		// Blocking, not try: a second run must WAIT and then find nothing to do. Exiting
+		// 0 without the migration applied is a lie the rollout believes.
+		if err := conn.Exec("SELECT pg_advisory_lock(?)", migrationLockID).Error; err != nil {
+			return fmt.Errorf("acquire migration lock: %w", err)
+		}
+		defer conn.Exec("SELECT pg_advisory_unlock(?)", migrationLockID)
+
+		if err := database.MigrateDB(conn); err != nil {
+			return err
+		}
+		// Seeds and backfills run after the schema they write to exists, in the same
+		// job, for the same reason the schema does: once, before any replica boots.
+		return database_seed.RunAll(conn)
+	})
+}
 ```
-internal/migrate/sql/
-    0001_init.sql
-    0002_orders_add_priority.sql
-    0003_orders_customer_idx.notx.sql
+
+### What migrating on boot costs
+
+```go
+// ✘ cmd/main.go
+err := database.MigrateDB(database.Db)
+if err != nil {
+	log.Printf("[STARTUP] Migration failed: %v", err)
+	// Continue anyway - application might still work with existing tables
+}
+database_seed.SeedCountries()
+database_seed.MigrateSeatData(database.Db)
 ```
 
-**Migrations are forward-only and additive across a rollout.** During a rolling
-deploy the old code runs against the new schema for as long as the rollout takes. A
-migration that drops a column the old code still selects turns the deploy into an
-outage for the half of the replicas that have not rolled yet. Adding a column is
-safe; removing one is two deploys - stop writing it, ship, then drop it, ship. There
-is no `Down`, because the rollback of a deploy is the previous image, and a `Down`
-that has never been run against real data is a script you are trusting for the first
-time during an incident.
+It looks tidy and free. It is neither.
 
-## The pool is explicit at boot
+- **Ten replicas roll at once and ten processes migrate.** The first takes an `ACCESS
+  EXCLUSIVE` lock for its `ALTER TABLE`; the other nine block on it, sit past their
+  startup deadline, get killed, restart, and block again. The rollout stalls and the
+  logs say only that the containers are not ready.
+- **"Continue anyway" serves new code against an old schema.** The migration failed;
+  the process reports healthy; the first request that reads the new column is a 500,
+  on every replica, and the only record of why is one log line at boot that scrolled
+  away an hour ago.
+- **Every replica runs every backfill.** A seat-data backfill that is idempotent runs
+  ten times and wastes ten minutes; one that is not quite idempotent runs ten times
+  and corrupts the data ten times, concurrently.
+- **Nothing can be gated on it.** A separate job has an exit code the deploy waits for.
+  A migration inside `main` completes at some point during the rollout, so the new
+  code is live against the old schema for a window nobody measured.
 
-`openDB` in `references/composition-and-lifecycle.md` sets four numbers. Every one of
-them has a default, and **a default pool is a number nobody chose that you discover
-under load.** What each one buys:
+### The rules around it
 
-- **`SetMaxOpenConns`. Default: unlimited.** Unlimited means the service opens one
-  connection per concurrent query until the server's `max_connections` refuses the
-  next one - and it refuses it for every service on that server, not just yours, and
-  for the psql session you were about to open to find out why. This number is your
-  share of a global budget: `replicas × MaxDBConns`, summed over every service on
-  that database, has to fit under `max_connections` with room left for the admin
-  connection you will need during the incident. Nobody owns that sum, which is why it
-  is the one that gets exceeded.
-- **`SetMaxIdleConns`. Default: 2.** With `MaxOpen` at 20 and `MaxIdle` at 2, a burst
-  opens 18 connections and then closes 18 connections, and the next burst opens them
-  again. You pay a TCP handshake, a TLS negotiation, and an auth round trip per query
-  at exactly the moment you are busiest. Set it equal to `MaxOpen`: a pool that grew
-  under load should stay grown, and `SetConnMaxIdleTime` is what shrinks it when the
-  load is genuinely gone.
-- **`SetConnMaxLifetime`. Default: forever.** A connection that never dies outlives
-  every proxy, pooler, and load balancer in front of it. After a failover your pool
-  is still holding connections to the old primary - which is now a replica - and
-  every write returns "cannot execute INSERT in a read-only transaction" until
-  somebody restarts the process. Same shape with a connection pooler in the path: it
-  reconfigures, your connections do not, and you are pinned to a backend that no
-  longer exists. Thirty minutes bounds every one of those to thirty minutes.
-- **`SetConnMaxIdleTime`. Default: forever.** Returns the connections a burst grew
-  once the burst is over, so a 3am traffic spike does not hold your whole quota until
-  the next deploy.
+- **Only the owner migrates a table.** When services share a database, exactly one of
+  them lists a model in its `MigrateDB`. The others may hold a copy of the struct to
+  read through, and say so in a comment on it; they never migrate it. Two services
+  migrating one table is two schema owners on two deploy schedules, and the one that
+  deploys second "fixes" the other's column.
+- **Forward-only, additive across a rollout.** During a rolling deploy the old code runs
+  against the new schema for as long as the rollout takes. Adding a column is safe.
+  Removing one is two deploys: stop reading and writing it, ship; then drop it in step 3
+  with `DROP COLUMN IF EXISTS`, ship. AutoMigrate never drops anything, which is the
+  one part of its behaviour this rule relies on.
+- **No reset in the binary.** A `ResetAndMigrateDB` that drops every table, compiled
+  into the same binary that runs in production, is one mistyped environment variable
+  away from deleting production. Local resets are a script against a local DSN, outside
+  the service's code.
+- **A big index is built `CONCURRENTLY`.** A plain `CREATE INDEX` on a large, hot table
+  blocks writes for the whole build. `CREATE INDEX CONCURRENTLY IF NOT EXISTS` in step 3
+  does not, and GORM's `Exec` runs outside a transaction, which `CONCURRENTLY`
+  requires. If one fails it leaves an `INVALID` index; the next run's `IF NOT EXISTS`
+  skips it, so step 3 drops invalid indexes by name before recreating them.
 
-`sql.Open` does not dial. `openDB` pings, under a timeout, and that ping is what
-turns a wrong password into a failed deploy instead of a 500 on somebody's first
-request.
+### Seeds and backfills
 
-## Tenancy is a parameter, then a constraint
+```go
+// database/database_seed/countries.seed.go
+package database_seed
 
-**A query missing its tenant scope is not a bug. It is a data breach.** It ships
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// SeedCountries is idempotent by construction: an upsert on the natural key. Running it
+// twice, or on a database that already has every row, changes nothing. A seed that
+// checks "is the table empty" first is a seed that never updates a row once it exists,
+// so the corrected spelling of a country name is shipped and never applied.
+func SeedCountries(db *gorm.DB) error {
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "iso_code"}},
+		DoUpdates: clause.AssignmentColumns([]string{"name", "dial_code"}),
+	}).CreateInBatches(countries, 200).Error
+}
+
+// RunAll is the single list, in order, called by cmd/migration after MigrateDB.
+func RunAll(db *gorm.DB) error {
+	steps := []struct {
+		name string
+		run  func(*gorm.DB) error
+	}{
+		{"countries", SeedCountries},
+		{"subscription plans", SeedSubscriptionPlans},
+		{"seat data backfill", BackfillSeatData},
+	}
+	for _, s := range steps {
+		if err := s.run(db); err != nil {
+			return fmt.Errorf("seed %s: %w", s.name, err)
+		}
+	}
+	return nil
+}
+```
+
+- **Every seed is an upsert on a natural key.** Reference data is code, and code that
+  changes has to be re-appliable.
+- **A backfill selects only the rows it has not done yet** (`WHERE new_col IS NULL`),
+  in batches, each batch its own transaction, so it is safe to re-run after a partial
+  failure and never holds a lock on the whole table.
+- **A backfill that is finished is deleted** in a later release, once every
+  environment has run it. Leaving it in `RunAll` forever is a scan per deploy that
+  does nothing.
+
+## Tenancy is a scope on every query
+
+**A query missing its tenant predicate is not a bug. It is a data breach.** It ships
 green, passes every test written by someone with one tenant in their fixture, and the
-first report is from a customer reading another customer's orders.
+first report is from a customer reading another customer's rows.
 
-So it does not get to be a thing you remember.
+So the predicate is not something each query remembers. It is one function:
 
 ```go
-// internal/domain/scope.go
-package domain
+// internal/helpers/tenancy.helper.go
+package helpers
 
-import "fmt"
+import (
+	"example.com/users-service/internal/contracts"
 
-// Scope is the tenant boundary as a TYPE. Every store method that touches a
-// tenant-owned table takes one.
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// TenantScope restricts a query to one parent user's rows. It has the signature of a
+// GORM scope AND of a PaginatedQueryFunc, so the same call works in db.Scopes(...) and
+// as the first modifier to ExecutePaginatedQuery.
 //
-// This is not a convention and it is not a review checklist item. A missing
-// `and tenant_id = $1` looks exactly like every other line of SQL and a reviewer's
-// eye slides off it. A missing Scope PARAMETER does not compile.
-type Scope struct {
-	TenantID int64
-}
-
-// Validate is the first line of every store method. Scope{} is constructible - Go
-// has no way to stop that - and Scope{}.TenantID is 0, which matches no rows until
-// the day a backfill inserts a row with a zero default and then matches all of them.
-// Refuse it at the one place every query already passes through.
-func (s Scope) Validate() error {
-	if s.TenantID <= 0 {
-		return fmt.Errorf("%w: query has no tenant scope", ErrInternal)
+// A zero or negative id is refused with db.AddError. GORM checks the statement's error
+// before it builds SQL, so the query never runs: an unscoped query fails loudly as a
+// 500 with a reference instead of quietly matching every tenant's rows. The zero is not
+// hypothetical - it is what an unset struct field, a failed Atoi and a missing JWT claim
+// all produce.
+func TenantScope(parentUserID int) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if parentUserID <= 0 {
+			_ = db.AddError(contracts.ErrMissingTenantScope)
+			return db
+		}
+		return db.Where(onCurrentTable("parent_user_id", parentUserID))
 	}
-	return nil
+}
+
+// AccountScope narrows to one account inside the tenant, for tables whose rows belong
+// to an account. It is TenantScope plus the account, never the account alone: an
+// account id without its tenant is a scope a forged id can satisfy.
+func AccountScope(parentUserID, ownerAccountID int) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if ownerAccountID <= 0 {
+			_ = db.AddError(contracts.ErrMissingTenantScope)
+			return db
+		}
+		return TenantScope(parentUserID)(db).Where(onCurrentTable("owner_account_id", ownerAccountID))
+	}
+}
+
+// onCurrentTable qualifies the column with the statement's own table, resolved when
+// GORM builds the SQL, so a scoped query that joins another tenant-owned table is not
+// an "ambiguous column" error. (Statement.Table is not usable here: GORM runs scopes
+// before it parses the model, so at this point the table is usually still empty.)
+func onCurrentTable(column string, value int) clause.Eq {
+	return clause.Eq{Column: clause.Column{Table: clause.CurrentTable, Name: column}, Value: value}
 }
 ```
 
-Be honest about what the type does and does not buy. It forces the store method to
-**have** the tenant. It cannot force the `where` clause to use it - a `Scope`
-parameter that never appears in the query compiles fine. What it changes is that the
-omission is now visible: a reviewer looking at a method whose signature says `sc
-domain.Scope` and whose SQL never says `tenant_id` is looking at a one-line diff, not
-at the absence of a line.
-
-**The line that cannot be reviewed away is in the schema.**
-
-```sql
-create table customers (
-    tenant_id  bigint not null,
-    id         bigint generated always as identity,
-    email      text   not null,
-    name       text   not null,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-
-    -- The tenant leads the key. Not beside it, in it.
-    primary key (tenant_id, id),
-    unique (tenant_id, id)
-);
-
--- The catalog is tenant-owned like everything else. Two tenants sell the same SKU at
--- different prices, and a PriceOf that forgets the tenant charges one of them the
--- other's price - quietly, and in the customer's favour exactly half the time.
-create table products (
-    tenant_id  bigint not null,
-    sku        text   not null,
-    unit_cents bigint not null check (unit_cents >= 0),
-
-    primary key (tenant_id, sku)
-);
-
-create table orders (
-    tenant_id   bigint not null,
-    id          bigint generated always as identity,
-    customer_id bigint not null,
-    total_cents bigint not null check (total_cents >= 0),
-    status      text   not null,
-    created_at  timestamptz not null default now(),
-    updated_at  timestamptz not null default now(),
-
-    primary key (tenant_id, id),
-
-    -- The composite foreign key is the whole trick. With `references customers (id)`
-    -- an order in tenant 7 can point at a customer in tenant 9 - the database will
-    -- happily let you - and then a join that looks perfectly scoped
-    -- (`where o.tenant_id = $1`) returns tenant 9's customer name through the join.
-    -- You scoped the query and leaked anyway. With this key, that row cannot be
-    -- inserted at all.
-    foreign key (tenant_id, customer_id) references customers (tenant_id, id)
-);
-
--- Every index leads with tenant_id. An index on (created_at) alone is an index the
--- planner uses for a tenant-scoped list by scanning other tenants' rows and throwing
--- them away - correct, and slower for every tenant as any one tenant grows.
-create index orders_tenant_created on orders (tenant_id, created_at desc, id desc);
-```
-
-That last index is `ExecutePaginatedQuery`'s ordering, in the schema:
-`(tenant_id, created_at desc, id desc)` is the `where` column, the sort column, and
-the tiebreak, in the order the query names them. An index that stops at `created_at`
-makes the tiebreak a sort, and the sort is the thing that turns a 25-row page into a
-read of every order the tenant has.
-
-And the type, beside the table it is:
+Used:
 
 ```go
-// internal/order/order.go
-
-// Order is the row. It lives next to the schema because it IS the schema, and the
-// two change in the same commit or one of them is lying.
-//
-// It carries TenantID even though every query already scopes by it, because a row
-// that has travelled - into a job payload, into a cache, into a peer's request -
-// has left the query that scoped it, and a row that cannot say which tenant it
-// belongs to is a row the next reader has to guess about.
-//
-// This type does not go on the wire. references/http-layer.md maps it to a response
-// DTO by hand, because the day someone adds a cost_cents column here is not the day
-// customers should start seeing margins.
-type Order struct {
-	TenantID   int64
-	ID         int64
-	CustomerID int64
-	TotalCents int64
-	Status     string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-}
+database.Db.Scopes(helpers.TenantScope(parentUserID)).First(&h, holidayID)            // a read by id
+database.Db.Scopes(helpers.AccountScope(parentUserID, accountID)).Find(&campaigns)    // an account's rows
+helpers.ExecutePaginatedQuery[model.UserHoliday](database.Db, p, helpers.TenantScope(parentUserID), ...)
 ```
+
+Be honest about what it buys and what it does not:
+
+- **It makes a missing tenant an error instead of a breach**, on every query that uses
+  it, including the read by primary key that "obviously" does not need a scope. It
+  does: an id is a guessable integer, and the scope is what turns another tenant's id
+  into a 404.
+- **It cannot force a query to use it.** A query that never calls `TenantScope`
+  compiles. What it changes is that the omission is now visible: every query on a
+  tenant-owned table either says `Scopes(helpers.TenantScope(` or does not, and a
+  reviewer can grep for the ones that do not.
+- **`Raw` and `Exec` bypass scopes entirely.** Raw SQL on a tenant-owned table writes
+  `parent_user_id = ?` itself, and a reviewer reads that line specifically.
+- **A join is scoped on both sides.** Scoping `deals` and joining `campaigns` by id
+  alone returns another tenant's campaign name through the join if the two ids ever
+  disagree. Join on the tenant column too.
+
+## Locking: pick by contention shape
+
+| Contention shape | Primitive | In GORM |
+|---|---|---|
+| One contested row, N writers, all must apply (a quota, a balance) | `SELECT ... FOR UPDATE` in the transaction | `tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, id)` |
+| Many independent rows, N workers, each row once | `FOR UPDATE SKIP LOCKED` | `clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}` with a `Limit` |
+| One job, N replicas, one should run | advisory lock | `references/background-work.md` |
+
+The wrong choice does not error, it degrades into something that looks like a
+different problem. `FOR UPDATE` without `SKIP LOCKED` on a work queue makes N workers
+deliver the throughput of one, and the graph looks like a capacity problem, so someone
+adds capacity and it does not move. `SKIP LOCKED` on a contested row makes the writers
+that skip it silently do nothing: the update is lost, no error, no log.
 
 ## Checklist
 
 A data-layer change is done when all of these are true. Any "no" is the bug you ship.
 
-- The SQL is in a store method. Not in a handler, not in a decision function.
-- The store method takes `domain.Scope` and calls `sc.Validate()` first.
-- The `where` clause names `tenant_id`, and the index it uses leads with it.
-- The query is inside `SafeDBQuery`, and the call site returns its error.
-- Nothing above `dbx` mentions `pgconn`, `sql.ErrNoRows`, or an SQLSTATE.
-- A new failure mode has a case in `Translate` and a sentinel in `domain`.
-- `RowsAffected` is checked on every `update` and `delete` whose zero is a failure.
-- A transaction is opened by `s.tx` in the service, never by a store.
-- Nothing inside the transaction talks to anything but this database.
-- A write that can be retried is an upsert against a real unique index, not a select
-  followed by an insert.
-- The schema change is one numbered file, additive, applied by `cmd/migrate`.
-- The invariant you are relying on exists as a constraint, not as an `if` in Go.
+- The query is in a service (or a helper the service hands a handle to), never in a
+  handler.
+- It is inside `SafeDBQuery` or `SafeDBTransaction`, and the call site returns the
+  error.
+- Every query on a tenant-owned table uses `TenantScope` or `AccountScope`; every
+  `Raw`/`Exec` on one writes the predicate itself.
+- `gorm.ErrRecordNotFound` and `gorm.ErrDuplicatedKey` become the resource's
+  sentinels; nothing above the service sees a GORM error type.
+- Inside a transaction callback, every statement uses `tx`, and nothing talks to
+  anything but this database.
+- A write that can be retried is an upsert against a real unique index.
+- `RowsAffected` is checked on every update and delete whose zero is a failure.
+- The model has explicit `column:` tags, a `TableName()`, tenancy columns, and an index
+  that leads with the tenant.
+- The schema change is in `MigrateDB` (rename first, AutoMigrate, then idempotent SQL),
+  and it is additive across a rollout.
+- Nothing in `cmd/main.go` migrates, seeds or backfills.
