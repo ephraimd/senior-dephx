@@ -1,589 +1,644 @@
 # Composition and lifecycle
 
-How this service starts, what owns what while it runs, and how it stops without
-leaving damage. One file, one function, one exit path.
+How this service starts, what it is made of while it runs, and how it stops without
+leaving damage. Three files carry it: `cmd/main.go` owns the process, `internal/routes/
+routes.go` owns the object graph, `internal/config/config.go` owns the inputs.
 
-The spine says `main` is the composition root and teardown is ordered. This is the
-shape that makes both true.
+The spine says config is read once, composition happens in one function, and `main`
+owns shutdown. This is the shape that makes all three true.
 
-## `main` is two lines; `run` is the graph
+## `main` owns the process, and only `main`
 
-`main` turns a failure into an exit code. That is all it may do, because `os.Exit`
-skips every pending defer - so a `main` that does the wiring is a `main` whose
-cleanup never runs on the error path, and the one time you need the database
-flushed is the one time the process died.
+`main` decides when the process starts accepting work, and it is the only code that
+decides when it stops. Nothing else in the service may register a signal handler, call
+`os.Exit`, or start something that outlives a request without handing it back to
+`main` to stop.
 
 ```go
-// cmd/api/main.go
+// cmd/main.go
 package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"example.com/users-service/database"
+	"example.com/users-service/internal/config"
+	"example.com/users-service/internal/contracts"
+	"example.com/users-service/internal/helpers"
+	"example.com/users-service/internal/middleware"
+	"example.com/users-service/internal/routes"
+	"example.com/users-service/pkg/logger"
 
-	"example.internal/svc/internal/config"
-	"example.internal/svc/internal/mailer"
-	"example.internal/svc/internal/order"
-	"example.internal/svc/internal/user"
-	"example.internal/svc/internal/worker"
+	"github.com/gin-gonic/gin"
 )
 
+// @title       Users Service
+// @version     1.0
+// @BasePath    /v1
 func main() {
-	if err := run(); err != nil {
-		slog.Error("fatal", "err", err)
-		os.Exit(1)
+	// Inputs first. LoadConfig panics on a required-and-missing key, naming it, before
+	// a single connection is open - so the deploy fails and the previous version keeps
+	// serving. See "Config" below for why this is a call and not an init().
+	config.LoadConfig()
+	logger.SetLevel(config.GlobalConfig.LogLevel)
+
+	if config.GlobalConfig.Env != string(contracts.LOCAL) {
+		gin.SetMode(gin.ReleaseMode)
 	}
-}
 
-// run is the composition root. Every dependency this process has is constructed
-// here, in dependency order, and passed down. If it is not in this function, this
-// process does not have it.
-func run() error {
-	cfg := config.Load() // panics on required-and-missing, naming the key
+	router := gin.New()
+	// Order is load-bearing; references/http-layer.md says why each sits where it does.
+	router.Use(
+		middleware.Recovery(),
+		middleware.AccessLog(),
+		middleware.CORS(),
+		middleware.SecureHeaders(),
+	)
+	helpers.RegisterJSONFieldNames()
 
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
-	log := slog.New(h).With("service", "orders", "env", cfg.Env)
+	// The database is the one dependency every request needs. LoadDatabase panics if
+	// it cannot connect, which is correct here: nothing is listening yet, nothing has
+	// been accepted, and a refused boot is the cheapest place a bad DSN can fail.
+	database.LoadDatabase()
 
-	// The root context. It is cancelled on SIGINT/SIGTERM, and everything
-	// constructed below inherits it, which is how a signal reaches a worker that
-	// is three layers deep without anyone passing a channel around.
+	// The whole object graph, built in one function. It returns the background workers
+	// it constructed and did not start, because starting and stopping them is a
+	// lifecycle decision and lifecycle is this file's job.
+	workers := routes.SetupRouter(router)
+
+	// The root context. Cancelled on SIGINT/SIGTERM, and every worker derives from it,
+	// which is how a signal reaches a ticker three layers down without anybody passing
+	// a channel around.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// --- Construct leaves first. Each defer is parked against its constructor,
-	// --- which is what makes teardown reverse construction order for free: defers
-	// --- are LIFO, so the only way to get the order wrong is to move a defer away
-	// --- from the line that created the thing it closes.
-
-	db, err := openDB(ctx, cfg, log)
-	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+	for _, w := range workers {
+		w.Start(ctx)
 	}
-	defer db.Close()
 
-	mail := mailer.NewClient(cfg.MailerURL, cfg.MailerToken, 10*time.Second)
-	defer mail.Close() // owns an http.Transport; see "Ownership" below
-
-	// Stores borrow the handle. Services own stores and clients.
-	users := user.NewStore(db)
-	orders := order.NewStore(db)
-
-	// One queue, named once. The service enqueues onto it and the consumer drains
-	// it, and they must be the same queue: construct it inline at each use and you
-	// have written two, which is the ownership rule below broken in the one place
-	// nobody looks, because both lines read correctly on their own.
-	jobs := worker.NewPgQueue(db, log)
-
-	userSvc := user.NewService(users, log)
-	orderSvc := order.NewService(db, orders, users, mail, jobs, log)
-
-	// Workers are owned by run, never by a service and never by a handler.
-	// See references/background-work.md for the Worker shape; run only needs to
-	// know it has Start(ctx) and Stop(timeout).
-	reaper := worker.New("order-reaper", cfg.ReaperInterval, log, orderSvc.ExpireStale)
-	reaper.Start(ctx)
-	defer reaper.Stop(cfg.ShutdownTimeout)
-
-	receipts := worker.NewConsumer("receipts", jobs, orderSvc.SendReceipt, log)
-	receipts.Start(ctx)
-	defer receipts.Stop(cfg.ShutdownTimeout)
-
-	// Transport last: it is the only thing that lets work in, so it is the first
-	// thing that must stop letting work in.
-	ready := &atomic.Bool{}
-	ready.Store(true)
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           router(cfg, log, ready, userSvc, orderSvc),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+	server := &http.Server{
+		Addr:    ":" + config.GlobalConfig.Port,
+		Handler: router,
+		// A server with no ReadHeaderTimeout holds a goroutine and a socket for every
+		// connection that opens and then says nothing, which is a denial of service
+		// anyone with a shell loop can run.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      config.GlobalConfig.WriteTimeout,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
-	return serve(ctx, srv, ready, cfg, log)
+	exitCode := serve(ctx, server)
+
+	// Teardown, in reverse construction order. Every step below runs on BOTH paths -
+	// the signal and the listener dying on its own - which is why none of them is a
+	// defer that os.Exit would skip.
+	for i := len(workers) - 1; i >= 0; i-- {
+		workers[i].Stop(config.GlobalConfig.WorkerStopTimeout)
+	}
+	// LAST, because everything above needed it until this line: a request that was
+	// mid-query when the database closed returns "sql: database is closed" as a 500,
+	// to a user whose request was fine, on a deploy you called successful.
+	database.CloseDatabase()
+
+	logger.Logger.Info("shutdown complete")
+	os.Exit(exitCode)
+}
+
+// serve runs the listener until the root context is cancelled or the listener dies,
+// then drains in-flight requests under a bound. It returns the process exit code.
+func serve(ctx context.Context, server *http.Server) int {
+	// Buffered by one. On the shutdown path nobody reads this channel, and an
+	// unbuffered send would block the listener goroutine forever.
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Logger.Infof("listening on %s", server.Addr)
+		errCh <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		// Died on its own: port in use, permission denied. Never swallowed - a process
+		// that logs "shutting down" when the port was busy hides the actual error.
+		if errors.Is(err, http.ErrServerClosed) {
+			return 0
+		}
+		logger.Logger.Errorf("listener failed: %v", err)
+		return 1
+	case <-ctx.Done():
+		logger.Logger.Info("shutdown signal received, draining")
+	}
+
+	// The drain gets its OWN context. ctx is already cancelled - that is why we are
+	// here - and passing it to Shutdown makes Shutdown return immediately and cut every
+	// in-flight request, which is precisely what this function exists to prevent.
+	drainCtx, cancel := context.WithTimeout(context.Background(), config.GlobalConfig.ShutdownTimeout)
+	defer cancel()
+
+	if err := server.Shutdown(drainCtx); err != nil {
+		// Requests still running at the deadline get cut. Loud, not silent: this line
+		// tells you the grace period is too short or an endpoint is too slow.
+		logger.Logger.Errorf("drain exceeded %s: %v", config.GlobalConfig.ShutdownTimeout, err)
+		return 1
+	}
+	logger.Logger.Info("http drained")
+	return 0
 }
 ```
 
-Read that function top to bottom and you know the entire process: what it talks to,
-what runs in the background, what closes when. That property is the deliverable.
-Wiring you have to grep for is an application nobody can hold in their head, and
-nobody who cannot hold it will dare change it.
+Read that file top to bottom and you know the process: what it reads, what it
+connects to, what runs in the background, and the exact order everything stops in.
 
-Timeouts on the `http.Server` are not decoration. A server with no
-`ReadHeaderTimeout` holds a goroutine and a socket per opened-and-silent
-connection, which is a denial of service anyone with a shell script can run
-against you.
+### No migrations, no seeds, no backfills in `main`
 
-## Config: read once, at boot, into a typed struct
+`main` does not call `database.MigrateDB`, does not seed, and does not run a data
+backfill. Not in local, not behind an env flag, not "just this once". Schema and data
+changes run in `cmd/migration`, once per deploy, before any replica boots;
+`references/data-layer.md` has the command and the cost of doing it any other way.
+
+The short version of that cost, because it is the reason this rule exists: ten
+replicas rolling at once is ten processes racing the same `ALTER TABLE`, and a
+migration that fails on boot and logs "continue anyway" leaves new code serving
+against an old schema, which reports healthy and fails on the first request that
+reads the new column.
+
+### No signal handler anywhere else
+
+```go
+// ✘ database/pgsql.go, being helpful.
+go func() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+	sqlDB, _ := Db.DB()
+	sqlDB.Close()
+	os.Exit(0)
+}()
+```
+
+Trace a deploy through that. The orchestrator sends SIGTERM. This goroutine and
+`main`'s handler both receive it. This one closes the pool and calls `os.Exit(0)`
+within microseconds, so:
+
+- `server.Shutdown` never runs. Every in-flight request is cut mid-write; the client
+  sees a reset connection, retries, and a non-idempotent write happens twice.
+- Requests that were not cut yet hit a closed pool and return `sql: database is
+  closed` as a 500 for the few microseconds before the exit.
+- `os.Exit` skips every deferred function in every goroutine. Workers mid-tick are
+  abandoned with their rows half-written.
+- It exits 0. The orchestrator records a clean stop. Nothing in any log says the
+  process was killed by its own database package.
+
+**A package that owns a resource exposes `Close`. It never decides when to call it.**
+`database.CloseDatabase()` exists and `main` calls it last. That split is the whole
+fix.
+
+## Config: read once, typed, explicitly
 
 ```go
 // internal/config/config.go
 package config
 
 import (
+	"time"
+
+	"example.com/users-service/internal/helpers"
+	"example.com/users-service/pkg/logger"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	Env      string
+	Port     string
+	LogLevel string
+
+	DBHost     string
+	DBPort     string
+	DBUser     string
+	DBPassword string
+	DBName     string
+	DBMaxConns int
+
+	JwtSecret                     string
+	InternalServicesWebhookSecret string
+
+	ActivitiesServiceBaseURL string
+
+	WriteTimeout      time.Duration
+	ShutdownTimeout   time.Duration
+	WorkerStopTimeout time.Duration
+}
+
+// GlobalConfig is one of the three process-wide handles (see "The three globals").
+// It is assigned exactly once, by LoadConfig, and never reassigned.
+var GlobalConfig *Config
+
+// LoadConfig is called as the FIRST line of every main: cmd/main.go, cmd/migration,
+// cmd/worker. It is deliberately not called from init().
+func LoadConfig() {
+	if err := godotenv.Load(".env"); err != nil {
+		// Normal in a container: the orchestrator injects the environment.
+		logger.Logger.Info("no .env file, using the process environment")
+	}
+
+	GlobalConfig = &Config{
+		Env:      helpers.GetOsEnvOrPanic("ENV"),
+		Port:     helpers.GetOsEnvOrPanic("PORT"),
+		LogLevel: helpers.GetOsEnvOrDefault("LOG_LEVEL", "info"),
+
+		DBHost:     helpers.GetOsEnvOrPanic("DB_HOST"),
+		DBPort:     helpers.GetOsEnvOrPanic("DB_PORT"),
+		DBUser:     helpers.GetOsEnvOrPanic("DB_USERNAME"),
+		DBPassword: helpers.GetOsEnvOrPanic("DB_PASSWORD"),
+		DBName:     helpers.GetOsEnvOrPanic("DB_DATABASE"),
+		DBMaxConns: helpers.GetOsEnvIntOrDefault("DB_MAX_CONNS", 10),
+
+		// Secrets have NO default. Ever. See the rules below.
+		JwtSecret:                     helpers.GetOsEnvOrPanic("JWT_SECRET"),
+		InternalServicesWebhookSecret: helpers.GetOsEnvOrPanic("INTERNAL_SERVICES_WEBHOOK_SECRET"),
+
+		// Peer URLs have NO default either: a default is a hostname, and the only
+		// hostname anyone ever types as a default is production's.
+		ActivitiesServiceBaseURL: helpers.GetOsEnvOrPanic("ACTIVITIES_SERVICE_BASE_URL"),
+
+		WriteTimeout:      helpers.GetOsEnvDurationOrDefault("HTTP_WRITE_TIMEOUT", 30*time.Second),
+		ShutdownTimeout:   helpers.GetOsEnvDurationOrDefault("SHUTDOWN_TIMEOUT", 20*time.Second),
+		WorkerStopTimeout: helpers.GetOsEnvDurationOrDefault("WORKER_STOP_TIMEOUT", 10*time.Second),
+	}
+}
+```
+
+```go
+// internal/helpers/osenv.helper.go
+package helpers
+
+import (
 	"fmt"
-	"log/slog"
 	"os"
 	"strconv"
 	"time"
 )
 
-type Config struct {
-	Env             string
-	Addr            string
-	LogLevel        slog.Level
-	DatabaseURL     string
-	MaxDBConns      int
-	AuthSecret      string
-	MailerURL       string
-	MailerToken     string
-	ReaperInterval  time.Duration
-	ShutdownTimeout time.Duration
-	ReadinessDelay  time.Duration
+// GetOsEnvOrPanic names the key it wanted. "Environment variable DB_HOST is not set"
+// ends the incident at the first log line. A bare "invalid configuration" starts a
+// bisect.
+func GetOsEnvOrPanic(key string) string {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value
+	}
+	panic("Environment variable " + key + " is not set")
 }
 
-// Load is called exactly once, from the composition root, before anything else
-// exists. After it returns, the process's inputs are fixed and typed, and the
-// only way to reach one is to have been handed it.
-func Load() Config {
-	return Config{
-		Env:             envOr("ENV", "development"),
-		Addr:            envOr("ADDR", ":8080"),
-		LogLevel:        levelOr("LOG_LEVEL", slog.LevelInfo),
-		DatabaseURL:     mustEnv("DATABASE_URL"),
-		MaxDBConns:      intOr("MAX_DB_CONNS", 20),
-		AuthSecret:      mustEnv("AUTH_SECRET"),
-		MailerURL:       mustEnv("MAILER_URL"),
-		MailerToken:     mustEnv("MAILER_TOKEN"),
-		ReaperInterval:  durOr("REAPER_INTERVAL", time.Minute),
-		ShutdownTimeout: durOr("SHUTDOWN_TIMEOUT", 20*time.Second),
-		ReadinessDelay:  durOr("READINESS_DELAY", 5*time.Second),
+func GetOsEnvOrDefault(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value
 	}
+	return defaultValue
 }
 
-// mustEnv names the key it wanted. "config: required env var DATABASE_URL is not
-// set" ends the incident at the first log line. A bare "invalid configuration"
-// starts a bisect.
-func mustEnv(key string) string {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		panic(fmt.Sprintf("config: required env var %s is not set", key))
+// Absent means default. Present-and-garbage means panic, never the default: falling
+// back on a typo means the deploy silently ignores the value someone typed, runs on a
+// number nobody chose, and reports success.
+func GetOsEnvIntOrDefault(key string, defaultValue int) int {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return defaultValue
 	}
-	return v
-}
-
-func envOr(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-// Absent means default. Present-and-garbage means panic - never the default.
-// Falling back on a typo means the deploy silently ignores the value someone
-// typed, runs on a number nobody chose, and reports success.
-func intOr(key string, def int) int {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.Atoi(raw)
 	if err != nil {
-		panic(fmt.Sprintf("config: %s=%q is not an integer", key, v))
+		panic(fmt.Sprintf("Environment variable %s=%q is not an integer", key, raw))
 	}
 	return n
 }
 
-func durOr(key string, def time.Duration) time.Duration {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def
+func GetOsEnvDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return defaultValue
 	}
-	d, err := time.ParseDuration(v)
+	d, err := time.ParseDuration(raw)
 	if err != nil {
-		panic(fmt.Sprintf("config: %s=%q is not a duration (want 30s, 5m)", key, v))
+		panic(fmt.Sprintf("Environment variable %s=%q is not a duration (want 30s, 5m)", key, raw))
 	}
 	return d
 }
 
-func levelOr(key string, def slog.Level) slog.Level {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def
+func GetOsEnvBoolOrDefault(key string, defaultValue bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return defaultValue
 	}
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(v)); err != nil {
-		panic(fmt.Sprintf("config: %s=%q is not a level (want debug|info|warn|error)", key, v))
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		panic(fmt.Sprintf("Environment variable %s=%q is not a boolean", key, raw))
 	}
-	return l
+	return b
 }
 ```
 
-Rules this encodes:
+The rules this encodes:
 
 - **Panic at boot, not at request time.** A required key that is missing kills the
-  process before it accepts a single connection. The deploy fails, the previous
-  version keeps serving, and the log line names the key. The alternative is a
-  process that reports healthy and fails on the first request that reaches the
-  unconfigured path, which may be the payment path, at 3am, on a Saturday.
-- **Panic is correct here and nowhere else.** `Load` runs once, on the main
-  goroutine, before any state exists to corrupt. That is the only place in this
-  service where panicking is the honest move.
-- **Every field is typed at the boundary.** `cfg.ReaperInterval` is a
-  `time.Duration`. Nobody downstream parses anything, so nobody downstream parses
-  it differently.
-- **No `os.Getenv` in a call path. Ever.** A hidden input is invisible from the
-  composition root, unreachable from a test, and it turns a boot error into
-  somebody's afternoon:
+  process before it accepts a connection. The alternative is a process that reports
+  healthy and fails on the first request that reaches the unconfigured path.
+- **A secret never has a default.** Not a test key, not "the staging one", not an
+  empty string that a middleware treats as "auth disabled". A default secret is a
+  secret committed to the repository, and it is the value production runs on the day
+  somebody forgets to set the variable. A secret that is genuinely optional (a
+  feature not every environment has) defaults to `""` and the code that uses it
+  treats `""` as **off**, and fails closed.
+- **A peer URL never defaults to production.** An unset variable on staging then
+  makes staging call production, with no error and no log line, and staging's test
+  data lands in a customer's account.
+- **Every field is typed at the boundary.** `WriteTimeout` is a `time.Duration`.
+  Nobody downstream parses anything, so nobody downstream parses it differently.
+- **No `os.Getenv` in a call path. Ever.** Not in a middleware, not in a route setup
+  function, not behind a feature flag check in a service. A flag read in a call path
+  is invisible from `LoadConfig`, unreachable from a test, and turns a boot error into
+  somebody's afternoon. Every flag is a `Config` field.
+- **`LoadConfig` is called, not run by `init()`.** An `init()` runs on import, so
+  every test in every package that imports `config` - which is every resource, through
+  `database` - needs the full production environment set or it panics before the
+  first test function runs. The suite becomes "needs a .env", which becomes "only runs
+  on one laptop". `cmd/migration` already calls `LoadConfig` explicitly; every `main`
+  does the same, as its first line.
+
+## The three globals
+
+This blueprint has exactly three package-level handles:
+
+| Handle | Set by | When |
+|---|---|---|
+| `config.GlobalConfig` | `config.LoadConfig()` | first line of every `main` |
+| `logger.Logger` | the logger package's `init()` | import time; it cannot fail |
+| `database.Db` | `database.LoadDatabase()` | after config, before `SetupRouter` |
+
+They are globals on purpose. Every service in the fleet reaches them the same way, so
+a reader who has seen one service has seen the plumbing of all of them; and a service
+method that needs the database calls `database.Db` instead of threading a handle
+through every constructor in the graph.
+
+The price is real and it is paid in three places, so the rules that keep them safe are
+not optional:
+
+- **Assigned once, at boot, before anything reads them. Never reassigned.** A global
+  that can change while requests run is shared mutable state with no lock, and the
+  race detector only finds it if a test happens to do both at once.
+- **Never closed by the package that holds them.** `CloseDatabase` exists; only
+  `main` calls it.
+- **Tests set them deliberately**, through one test helper per package that needs
+  them (`database.Db = testDB` in a `TestMain`), never by importing a package whose
+  `init()` reaches for a real database.
+- **There is no fourth.** A package-level `var` holding a client, a cache, a worker or
+  a token provider is a dependency `SetupRouter` cannot see, so the one function that
+  is supposed to describe the service has stopped describing it. Those are
+  constructed in `SetupRouter` and handed in.
+
+The logger is the one handle set by `init()`, and only because its `init()` cannot
+fail and reads nothing required:
 
 ```go
-// ✘ The read is buried where nobody looks.
-func (s *OrderService) Charge(ctx context.Context, o Order) error {
-	key := os.Getenv("PAYMENT_KEY") // empty in CI, empty in the new region, empty
-	                                // in every test that did not know to set it
-	...
-}
+// pkg/logger/logger.go
+package logger
 
-// ✔ The dependency is named, so the root supplies it and a test replaces it.
-type OrderService struct{ paymentKey string }
-```
+import (
+	"os"
 
-## Banned: containers, `init()`, package singletons, global handles
+	"github.com/sirupsen/logrus"
+)
 
-```go
-// ✘ The whole anti-pattern in six lines.
-package store
-
-var DB *sql.DB
+var Logger *logrus.Logger
 
 func init() {
-	DB, _ = sql.Open("pgx", os.Getenv("DATABASE_URL"))
+	Logger = logrus.New()
+	Logger.SetOutput(os.Stdout)
+	Logger.SetFormatter(&logrus.JSONFormatter{})
+	Logger.SetLevel(logrus.InfoLevel)
 }
 
-func FindUser(ctx context.Context, id int64) (*User, error) {
-	return scanUser(DB.QueryRowContext(ctx, `select id, email from users where id = $1`, id))
-}
-```
-
-Count what that costs:
-
-- The error is discarded, so a bad URL produces a nil `DB` and the failure is a
-  nil-pointer panic on the first request instead of a refused boot.
-- `init()` runs on import. `go test ./internal/store` now needs a live database to
-  run a test that touches no database, so the suite is slow, flaky, and eventually
-  skipped.
-- Nothing can replace `DB`, because nothing was ever asked for it. The seam does
-  not exist, so the test either talks to a real database or does not exist either.
-- Nothing closes it. It lives until the process dies, however the process dies.
-- The order of `init()` across packages is decided by the import graph, which means
-  a new import in an unrelated file can reorder your startup.
-
-```go
-// ✔ The dependency has a name, so the root supplies it and a test replaces it.
-package user
-
-type Store struct{ db *sql.DB }
-
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
-
-func (s *Store) Find(ctx context.Context, id int64) (*User, error) {
-	const q = `select id, email from users where id = $1`
-	return scanUser(s.db.QueryRowContext(ctx, q, id))
-}
-```
-
-**State a constructor does not name is state a test cannot replace and a reader
-cannot find.** That is the entire rule. A DI container fails it the same way a
-global does: the graph moves from a function you can read into a registry you have
-to execute to understand, and "which implementation is live in production" becomes
-a question you answer by running the program.
-
-## Ownership: one owner, named at construction
-
-**Every constructed resource has exactly one owner responsible for closing it.**
-The owner is whoever constructed it. Handing a resource to a constructor does not
-transfer ownership unless that constructor's doc comment says it does.
-
-```go
-// The store BORROWS the handle. It never closes it. If it did, the second store
-// sharing that handle would start returning "sql: database is closed" from an
-// unrelated endpoint, and the stack trace would name the innocent caller.
-type Store struct{ db *sql.DB }
-```
-
-```go
-// internal/mailer/client.go
-//
-// Client OWNS the transport it built, so it exposes Close and the root defers it.
-// A resource with a constructor and no Close is a claim that it holds nothing -
-// make that claim true or provide the Close.
-type Client struct {
-	http *http.Client
-	tr   *http.Transport
-	base string
-	tok  string
-}
-
-func NewClient(base, token string, timeout time.Duration) *Client {
-	tr := &http.Transport{
-		MaxIdleConns:        64,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
-	}
-	return &Client{
-		tr:   tr,
-		http: &http.Client{Transport: tr, Timeout: timeout},
-		base: base,
-		tok:  token,
-	}
-}
-
-func (c *Client) Close() { c.tr.CloseIdleConnections() }
-
-// SendReceipt is the only way a receipt leaves this process, and its shape is
-// references/inter-service.md's typed-client rule: a scope, and a request struct of
-// the scalars the peer needs. Never an order.Order - that is this service's storage
-// model, and a storage model on the wire publishes every column anyone adds to it
-// later, to a peer that never asked for any of them.
-type ReceiptRequest struct {
-	OrderID    int64 `json:"order_id"`
-	CustomerID int64 `json:"customer_id"`
-	TotalCents int64 `json:"total_cents"`
-}
-
-// The scope is a parameter and not a field on the request, so the peer reads it from
-// the header this call sets and never has to trust the body for it. client.JSON runs
-// sc.Validate() before it builds anything, so a zero tenant stops here.
-//
-// c.call and peerName belong to this package too; references/inter-service.md declares
-// them, along with the retry and idempotency rules this method is leaning on.
-func (c *Client) SendReceipt(
-	ctx context.Context,
-	sc domain.Scope,
-	r ReceiptRequest,
-) error {
-	_, err := client.JSON[receiptAccepted](ctx, c.call(client.Call{
-		Method: http.MethodPost,
-		Path:   "/v1/receipts",
-		Scope:  sc,
-		Body:   r,
-		// Our stable id for the work. A fresh uuid per attempt is a new fact each
-		// time, and then a retried 504 is a second receipt.
-		IdempotencyKey: strconv.FormatInt(r.OrderID, 10),
-		Retry:          true,
-	}))
-	return err
-}
-
-// The peer's payload contract, not its envelope - client.JSON already unwrapped that.
-type receiptAccepted struct {
-	ReceiptID string `json:"receipt_id"`
-}
-```
-
-A constructor that fails owns the cleanup of whatever it built before it failed,
-because the caller never received a handle and cannot close what it was never
-given:
-
-```go
-func openDB(ctx context.Context, cfg config.Config, log *slog.Logger) (*sql.DB, error) {
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+// SetLevel is called by main once config is loaded. An unparseable level stays at
+// info and says so, rather than panicking over a log setting.
+func SetLevel(level string) {
+	l, err := logrus.ParseLevel(level)
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(cfg.MaxDBConns)
-	db.SetMaxIdleConns(cfg.MaxDBConns)
-	db.SetConnMaxLifetime(30 * time.Minute)
-	db.SetConnMaxIdleTime(5 * time.Minute)
-
-	// sql.Open is lazy. It has not dialled anything and it will not fail on a
-	// wrong password. Without this ping the process boots green, passes its
-	// startup probe, and fails on the first request - which moves a config error
-	// from the deploy that caused it to a user who did not.
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := db.PingContext(pingCtx); err != nil {
-		db.Close() // we opened it and the caller never saw it, so we close it
-		return nil, fmt.Errorf("ping: %w", err)
-	}
-
-	log.Info("db connected", "max_conns", cfg.MaxDBConns)
-	return db, nil
-}
-```
-
-**The failure this prevents: a worker or a pool that outlives the process it
-belonged to.** When a service constructs its own pool instead of being handed one,
-nobody in `run` knows it exists, so nobody closes it. Its goroutines keep running
-after `run` returns, its connections stay checked out on the server until an idle
-reaper eventually kills them, and you are now holding two pools' worth of
-connections against a limit you tuned for one. The symptom is "too many
-connections" on a service you did not deploy, and the cause is a constructor that
-took ownership without saying so.
-
-## Shutdown: stop accepting, drain, close in reverse
-
-Two distinct steps that get conflated. **Cancelling the context asks; `Stop` waits
-for the answer.** A shutdown that only cancels is not a shutdown, it is a race you
-usually win.
-
-```go
-func serve(
-	ctx context.Context,
-	srv *http.Server,
-	ready *atomic.Bool,
-	cfg config.Config,
-	log *slog.Logger,
-) error {
-	// Buffered by one. On the shutdown path nobody reads this channel, and an
-	// unbuffered send would block the listener goroutine forever.
-	errCh := make(chan error, 1)
-
-	go func() {
-		log.Info("http listening", "addr", srv.Addr)
-		err := srv.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil // our own Shutdown, not a failure
-		}
-		errCh <- err
-	}()
-
-	select {
-	case err := <-errCh:
-		// Died on its own: port in use, permission denied. Never reached on the
-		// normal path, and it must not be swallowed - a process that logs
-		// "shutting down" when the port was busy hides the actual error.
-		return fmt.Errorf("listen: %w", err)
-	case <-ctx.Done():
-		log.Info("shutdown signal received")
-	}
-
-	// 1. Stop being routed to, BEFORE closing the listener. Shutdown closes it
-	// instantly, but the load balancer keeps sending for up to one health-check
-	// interval, and every request it sends into a closed listener is a
-	// connection-refused that the client sees as a 502. Those 502s are caused by
-	// the deploy and blamed on the code.
-	ready.Store(false)
-	log.Info("readiness off, waiting for routing to drain", "delay", cfg.ReadinessDelay)
-	time.Sleep(cfg.ReadinessDelay)
-
-	// 2. Stop accepting and drain what is in flight, under a bound.
-	//
-	// The deadline gets its OWN context. ctx is already cancelled - that is why we
-	// are here - so passing it to Shutdown makes Shutdown return immediately and
-	// cut every in-flight request, which is precisely the thing this function
-	// exists to prevent.
-	drainCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-
-	if err := srv.Shutdown(drainCtx); err != nil {
-		// Requests still running at the deadline get cut mid-flight. Loud, not
-		// silent: this is the line that tells you the grace period is too short
-		// or an endpoint is too slow.
-		return fmt.Errorf("drain exceeded %s: %w", cfg.ShutdownTimeout, err)
-	}
-
-	log.Info("http drained")
-	return nil // run's defers now fire in reverse construction order
-}
-```
-
-Then `run`'s defers unwind, and because each one was written against its
-constructor, the order is exactly the reverse of the way the graph was built:
-
-```
-serve returns          -> no request is still running
-receipts.Stop(...)     -> the queue consumer finishes its current message
-reaper.Stop(...)       -> the ticker finishes its current tick
-mail.Close()           -> idle connections released; nothing is using them now
-db.Close()             -> LAST, because everything above needed it until now
-stop()                 -> signal handler unregistered
-```
-
-Get that order wrong and the failure is specific. Close `db` before draining and
-every in-flight request that was mid-query returns `sql: database is closed` as a
-500 - to a user whose request was fine, on a deploy you called successful.
-
-`ready` also decides what `/readyz` returns; `/healthz` is a separate endpoint that
-checks nothing but the process. Liveness that pings the database restarts every
-replica during a database blip, turning a thirty-second dependency wobble into a
-full outage you caused.
-
-### The bounded wait is not optional
-
-Every `Stop` takes a deadline and logs when it blows it:
-
-```go
-// A job that ignores its context would otherwise hold the process open until the
-// orchestrator's SIGKILL, which arrives with the tick mid-write. Abandon it here,
-// loudly, so the log names the worker instead of leaving you a silent 137.
-func (w *Worker) Stop(timeout time.Duration) {
-	if w.cancel == nil {
+		Logger.Warnf("unknown LOG_LEVEL %q, staying at info", level)
 		return
 	}
-	w.cancel()
-	select {
-	case <-w.done:
-	case <-time.After(timeout):
-		w.log.Error("worker did not stop in time, abandoning", "timeout", timeout)
-	}
+	Logger.SetLevel(l)
 }
 ```
 
-Budget the total. The orchestrator kills at its own grace period, so the sum of
-every `Stop` timeout plus `ShutdownTimeout` plus `ReadinessDelay` must fit inside
-it. If it does not, your careful ordering is decoration: SIGKILL arrives partway
-down the list and the resources after it never close at all.
+## `SetupRouter` is the composition root
+
+`main` owns the process; `SetupRouter` owns the object graph. Every client, service,
+handler and worker in the service is constructed in this one function, in dependency
+order, and handed to whatever needs it.
+
+```go
+// internal/routes/routes.go
+package routes
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"example.com/users-service/internal/config"
+	"example.com/users-service/internal/helpers"
+	"example.com/users-service/internal/middleware"
+	holidaysresource "example.com/users-service/internal/resources/holidays_resource"
+	reconcilerresource "example.com/users-service/internal/resources/reconciler_resource"
+	"example.com/users-service/pkg/worker"
+	activitiesclient "example.com/users-service/pkg/activities_client"
+
+	"github.com/gin-gonic/gin"
+)
+
+// BackgroundWorker is what main needs from anything that runs without a request:
+// start it under the root context, and stop it under a bound.
+type BackgroundWorker interface {
+	Start(ctx context.Context)
+	Stop(timeout time.Duration)
+}
+
+// SetupRouter builds the whole service. Read it top to bottom and you know every
+// dependency every resource has. If it is not constructed here, the service does not
+// have it.
+func SetupRouter(router *gin.Engine) []BackgroundWorker {
+	setDefaultRoutes(router)
+
+	v1 := router.Group("/v1")
+	setupSwagger(v1)
+
+	// 1. Clients: peers and vendors. Leaves first.
+	activitiesClient := activitiesclient.NewActivitiesClient(
+		config.GlobalConfig.ActivitiesServiceBaseURL,
+		config.GlobalConfig.InternalServicesWebhookSecret,
+	)
+
+	// 2. Services, in dependency order. A service that needs another service is
+	// constructed after it, and receives it as a parameter.
+	holidaysService, err := holidaysresource.NewHolidaysService(activitiesClient)
+	must("holidays service", err)
+
+	reconcilerService, err := reconcilerresource.NewReconcilerService(activitiesClient)
+	must("reconciler service", err)
+
+	// 3. Handlers.
+	holidaysHandler, err := holidaysresource.NewHolidaysHandler(holidaysService)
+	must("holidays handler", err)
+
+	// 4. Routes. Auth is applied to the GROUP, never route by route: a per-route
+	// middleware list is a list someone appends to, and the route they forget is
+	// public forever with nothing to notice it.
+	internal := v1.Group("", middleware.InternalServicesAuth())
+	user := v1.Group("", middleware.RequireValidJWT())
+
+	setupHolidaysRoutes(internal.Group("/holidays"), user.Group("/me/holidays"), holidaysHandler)
+
+	// 5. Background work: constructed here, started and stopped by main. Never
+	// `go x.Run(context.Background())` from this function - see below.
+	return []BackgroundWorker{
+		worker.NewTicker("crm-reconciler", time.Hour, reconcilerService.ReconcileAll),
+	}
+}
+
+// must turns a construction error into a boot failure that names the thing that
+// failed. Construction is the one place a panic is the honest move: nothing is
+// listening yet, so a refused boot costs one failed deploy and nothing else.
+func must(what string, err error) {
+	if err != nil {
+		panic("Failed to initialise " + what + ": " + err.Error())
+	}
+}
+
+func setDefaultRoutes(router *gin.Engine) {
+	// Liveness checks the process and nothing else. A probe that pings the database
+	// restarts every replica during a database blip, which turns a thirty-second
+	// wobble into a full outage that you caused.
+	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(helpers.RespondOk("alive", &gin.H{"status": "ok"}))
+	})
+	router.NoRoute(func(c *gin.Context) {
+		c.JSON(helpers.RespondError("route not found", nil, http.StatusNotFound))
+	})
+}
+
+func setupHolidaysRoutes(internal, user *gin.RouterGroup, h *holidaysresource.HolidaysHandlerImpl) {
+	// Service-to-service: the caller authenticated with the internal secret and
+	// derived user_id from a credential of its own.
+	internal.GET("/user/:user_id", h.ListHolidays)
+	internal.POST("/user/:user_id", h.AddHoliday)
+	internal.DELETE("/user/:user_id/:holiday_id", h.RemoveHoliday)
+
+	// User-facing: identity from the JWT, so there is no user_id in the path at all.
+	user.GET("", h.ListMyHolidays)
+}
+```
+
+The rules this encodes:
+
+- **Clients, then services, then handlers, then routes, then workers.** The order is
+  the dependency graph, written down. A service constructed before the client it needs
+  does not compile, which is the cheapest correctness check this file has.
+- **A construction error panics at boot, naming the resource.** `must` exists so that
+  every constructor is handled the same way. `logger.Fatalf` is not a substitute: it
+  calls `os.Exit` and skips every defer, including the ones `main` is about to rely on.
+- **A degraded dependency is a decision, written down.** If a resource genuinely can
+  run without a client (a payment gateway that is not configured in local), its
+  constructor accepts a nil and the service returns `contracts.ErrUnavailable` from
+  the methods that needed it. What is banned is the third option: logging the error,
+  assigning nil, and carrying on, so the first request to need the client is a
+  nil-pointer panic.
+- **`SetupRouter` starts nothing.** No goroutine, no ticker, no provisioning loop.
+  `go reconciler.Run(context.Background(), ...)` in this function is a goroutine with no
+  owner: no context that shutdown cancels, no `Stop`, no bound. It is still mid-write
+  when `CloseDatabase` runs, and its last act is an error against a closed pool.
+  Construct it here, return it, and `main` starts it under the root context and stops
+  it in reverse order.
+- **One route-setup function per resource**, `setup<Name>Routes(group, handler)`, so
+  the URL table for a resource is one function and a reviewer sees its whole surface
+  at once.
+
+## Shutdown: stop accepting, drain, stop workers, close
+
+Two distinct steps that get conflated. **Cancelling the context asks; `Stop` waits for
+the answer.** A shutdown that only cancels is a race you usually win.
+
+```
+SIGTERM                -> ctx cancelled: workers start no new tick, and their current
+                          tick's context is cancelled, while the HTTP drain runs
+server.Shutdown(...)   -> listener closed; in-flight requests finish under ShutdownTimeout
+workers[n-1].Stop(...) -> WAITS until the last worker started has actually exited
+...
+workers[0].Stop(...)   -> WAITS until the first worker started has actually exited
+CloseDatabase()        -> LAST, because everything above needed it until now
+os.Exit(code)          -> nothing deferred is left to skip
+```
+
+The cancel reaches the workers at the signal, so they usually wind down while the
+HTTP drain is still running, and `Stop` finds them already gone. `Stop` is still
+required: it is the only thing that proves a worker has exited before the database it
+is writing to closes.
+
+**Budget the total.** The orchestrator kills at its own grace period: Docker's default
+is ten seconds. `ShutdownTimeout`, plus `WorkerStopTimeout` times the number of
+workers, plus any readiness delay, must fit inside that period with room to spare. If
+it does not, the careful ordering is decoration: SIGKILL arrives partway down the list
+and `CloseDatabase` never runs. Set the orchestrator's stop grace period explicitly, to
+a number you computed from these three.
+
+If the platform routes by a readiness probe, add one: a `/readyz` that returns 503
+from the moment the signal arrives, and a short sleep before `server.Shutdown` so the
+load balancer stops routing while the listener is still open. Without it, the requests
+the balancer sends in the gap hit a closed listener and the client sees a 502 that
+the deploy caused and the code gets blamed for.
 
 ## What an unordered exit actually costs
 
-`os.Exit(0)` on a signal, or no signal handling at all, is not "a faster restart".
-It is this:
+`os.Exit(0)` on a signal, or no signal handling at all, is not "a faster restart". It
+is this:
 
 - A handler wrote its side effect and had not yet written its response. The socket
   dies. The client sees a network error, retries, and the effect happens twice.
-  Nothing logged that. It surfaces days later as a duplicate charge, and by then
-  nothing points back at the deploy that caused it.
-- A worker had claimed a job and had not yet acked it. On restart it redelivers, so
-  the job runs twice - which is survivable only because you made the handler
-  idempotent, and you only did that if someone told you this would happen.
+  Nothing logged that. It surfaces days later as a duplicate charge, and nothing
+  points back at the deploy that caused it.
+- A worker had leased a job and had not acked it. It redelivers and runs twice, which
+  is survivable only because the handler is idempotent, and it is only idempotent if
+  someone said this would happen (`references/background-work.md`).
 - A batch was halfway through writing rows outside a transaction. Half exist. No
   record says which half.
 
-None of these produce an error log. That is the point: an unordered exit does not
-fail, it truncates, and truncated work is damage with no signal attached. Someone
-finds it later, without a stack trace, without a timestamp, without you.
+None of these produce an error log. An unordered exit does not fail, it truncates, and
+truncated work is damage with no signal attached.
 
 ## Refactor order
 
-Bringing an existing service to this shape, one landable commit at a time. Nothing
-below changes behaviour, which is what makes each step revertible on its own.
+Bringing an existing service to this lifecycle, one landable commit at a time. The
+order matters more here than anywhere else in the blueprint.
 
-1. **Add `Config` and `Load`.** Wire it in `main` and pass it nowhere yet. Green.
-2. **Kill `os.Getenv` call sites, leaf-first.** Each one becomes a field on the
-   struct that needed it, supplied by the constructor. One package per commit.
-3. **Give every global a constructor.** `var DB` becomes `NewStore(db)`. The global
-   stays, temporarily assigned in `run`, so callers migrate one at a time.
-4. **Delete the globals and the `init()`s.** This is the commit that cannot land
-   until step 3 is finished everywhere, and it is the one that proves it is.
-5. **Introduce `run`.** Move the wiring out of `main`, add the defers against their
-   constructors.
-6. **Add signal handling and `serve`.** Shutdown last, because it is worthless
-   until the resources it orders actually have owners.
-
-Do not reorder these. Adding graceful shutdown to a service that still has a global
-`db` closes a handle that other packages are still holding, which converts a clean
-exit into a crash and gets the whole effort reverted.
+1. **Create `cmd/migration` and wire it into the deploy as a pre-deploy job.** It runs
+   `MigrateDB` and the seeds. Ship it and watch it run on a real deploy **while boot
+   still migrates too** (both are idempotent, so running twice is safe). Do not move to
+   step 2 until a deploy has shown the job's exit code gating the rollout.
+2. **Delete migrations, seeds and backfills from `main`.** Only now: removing the boot
+   migration before the job exists ships a deploy that changes no schema at all, and
+   the first request that reads the new column is a 500.
+3. **Make `LoadConfig` explicit** as the first line of every `main`, and delete the
+   `init()` that called it.
+4. **Move every `os.Getenv` in a call path into `Config`**, one package per commit.
+5. **Return background loops from `SetupRouter`** as `BackgroundWorker`s instead of
+   starting them there, one loop per commit. Each one needs a `Start`/`Stop`; the
+   `worker.Ticker` in `references/background-work.md` is the default.
+6. **Add `CloseDatabase` and delete the signal goroutine from `pgsql.go`**, in the same
+   commit as adding `signal.NotifyContext` and `serve` to `main`. Never one without the
+   other: removing the database's handler before `main` has one leaves a process that
+   ignores SIGTERM until SIGKILL.

@@ -1,1404 +1,1068 @@
 # The HTTP layer
 
-The edge. What a route is wired to, what a handler is allowed to do, and the one
-shape every response wears on the way out.
+The edge. What every request passes through, what a handler is allowed to do, the one
+shape every response wears on the way out, and the one function that turns a failure
+into a status code.
 
-The spine says layers do only their job, there is one response envelope, and every
-list paginates through one executor. This is the code that makes those true.
+The spine says layers do only their job, there is one response envelope, every error
+reaches the wire through one helper, and every list paginates through one executor.
+This is the code that makes those true.
 
-## `router` is one function and it is the whole route table
+## Routing is Gin groups, and auth belongs to the group
 
-`run` calls it in exactly one place (`references/composition-and-lifecycle.md`), so
-`router` lives beside it in `package main`. It builds no dependency and owns no
-resource: everything it needs was constructed in the root and handed to it. A router
-that opens its own database handle is a second composition root, and the first one
-does not know it exists.
+Routes are registered in `internal/routes/routes.go`, one `setup<Name>Routes` function
+per resource (`references/composition-and-lifecycle.md` shows the whole function).
+Two rules carry the weight:
+
+- **Auth is a property of the group, never of a route.** `v1.Group("",
+  middleware.InternalServicesAuth())` is one decision about every route under it.
+  `group.POST("/x", middleware.InternalServicesAuth(), h.X)` repeated per route is a
+  list somebody appends to, and the route they forget is public forever with nothing
+  to notice it.
+- **A route's audience decides its group, and its group decides where identity comes
+  from.** User-facing routes live under `RequireValidJWT` and read identity from the
+  token. Service-to-service routes live under `InternalServicesAuth` and take tenant
+  ids in the path. A route under neither is public, and a public route is a decision
+  somebody made out loud in the PR, not a default.
 
 ```go
-// cmd/api/router.go
-package main
-
-import (
-	"net/http"
-	"sync/atomic"
-
-	"log/slog"
-
-	"example.internal/svc/internal/config"
-	"example.internal/svc/internal/httpx"
-	"example.internal/svc/internal/order"
-	"example.internal/svc/internal/user"
-)
-
-// router is called once, from run, with dependencies it did not build. Note what is
-// NOT a parameter: no *sql.DB, no mailer, no logger of its own. If a handler needs
-// something, it needs it through the service it was given, which is what keeps the
-// dependency graph readable from run alone.
-func router(
-	cfg config.Config,
-	log *slog.Logger,
-	ready *atomic.Bool,
-	userSvc *user.Service,
-	orderSvc *order.Service,
-) http.Handler {
-	// Feature folders own their route tables. router names the features it mounts
-	// and knows none of their paths - so adding an endpoint is a one-file change in
-	// one folder, instead of a line in a central 200-line routes file that every
-	// feature branch also edits and every merge conflicts on.
-	api := http.NewServeMux()
-	user.Routes(api, user.NewHandler(userSvc))
-	order.Routes(api, order.NewHandler(orderSvc))
-
-	mux := http.NewServeMux()
-
-	// Probes are public: an orchestrator has no credential and will not get one.
-	mux.Handle("GET /healthz", httpx.Health())
-	mux.Handle("GET /readyz", httpx.Ready(ready))
-
-	// One subtree, one auth boundary. Auth wraps the mount, not each route: a
-	// per-route wrapper is a list someone appends to, and the endpoint they forget
-	// to wrap is public forever with nothing to notice it.
-	mux.Handle("/v1/", chain(api, httpx.RequireAuth(cfg.AuthSecret, log)))
-
-	return chain(mux,
-		httpx.Recover(log),
-		httpx.RequestID(),
-		httpx.Logging(log),
-	)
-}
-
-// chain applies middleware outermost-first, so the call site reads in the order a
-// request travels. mw[0] sees the request first and the response last.
-func chain(h http.Handler, mw ...func(http.Handler) http.Handler) http.Handler {
-	for i := len(mw) - 1; i >= 0; i-- {
-		h = mw[i](h)
-	}
-	return h
-}
+// The three audiences, as groups. Nothing is registered on v1 directly except the
+// docs route, so "which group is this under" always has an answer.
+internal := v1.Group("", middleware.InternalServicesAuth())
+user := v1.Group("", middleware.RequireValidJWT())
+public := v1.Group("/public") // the prefix says it, so a reviewer cannot miss it
 ```
 
-`cfg.AuthSecret` is a `Config` field like every other input to this process:
-`AuthSecret: mustEnv("AUTH_SECRET")` in `config.Load`. It is read once, at boot,
-and a missing one refuses the deploy. An `os.Getenv("AUTH_SECRET")` inside
-`RequireAuth` is a service that boots green and rejects every request, or worse
-verifies every token against the empty string.
+## Middleware order is not a preference
 
-The route table itself:
+Global middleware, outermost first: **Recovery, AccessLog, CORS, SecureHeaders.** Auth
+is innermost, on the group. Each position is paid for by a specific failure.
 
-```go
-// internal/user/routes.go
-package user
-
-import "net/http"
-
-// Routes registers this feature and nothing else. It takes the mux rather than
-// returning one, because a feature that returns its own mux has an opinion about
-// its own prefix, and then the prefix lives in two files.
-func Routes(mux *http.ServeMux, h *Handler) {
-	mux.Handle("GET /v1/users", http.HandlerFunc(h.List))
-	mux.Handle("GET /v1/users/{id}", http.HandlerFunc(h.Get))
-	mux.Handle("POST /v1/users", http.HandlerFunc(h.Create))
-}
-```
-
-Method patterns are load-bearing. `mux.Handle("/v1/users", ...)` without a method
-answers `DELETE /v1/users` with the list handler and a 200. The verb is part of the
-route or the route is a guess.
-
-### Middleware order is not a preference
-
-Outermost to innermost: **recovery, request id, logging, auth.** Each position is
-paid for by a specific failure.
-
-- **Recovery outermost.** An unrecovered panic in a handler goroutine does not fail
-  a request, it kills the process - along with every unrelated request in flight and
-  every worker mid-write. Anything sitting outside recovery is code whose panic is
-  an outage. Recovery goes first so that nothing is outside it.
-- **Request id above logging.** Logging above request id logs nothing useful. A
-  line with no correlation id cannot be joined to the other twenty the same request
-  emitted, so the one time you need to reconstruct what happened you have a
-  haystack sorted by timestamp and interleaved with two hundred other requests.
-- **Logging above auth.** Put logging inside auth and every rejected request is
-  invisible. A credential-stuffing run then leaves no trace in your access log, and
-  the first evidence is the account that gets taken over.
-- **Auth innermost, and only on the protected subtree.** Nothing sits between it and
-  the handler, so nothing can drop or overwrite the identity it put in the context.
-
-Recovery covers the request goroutine only. A panic in a goroutine a handler
-started is still fatal, which is one more reason handlers do not start goroutines -
-see `references/background-work.md`.
+- **Recovery outermost.** An unrecovered panic in a handler kills the process, along
+  with every unrelated request in flight and every worker mid-write. Anything outside
+  recovery is code whose panic is an outage.
+- **AccessLog above auth.** Put logging inside auth and every rejected request is
+  invisible: a credential-stuffing run leaves no trace in the access log, and the
+  first evidence is the account that gets taken over.
+- **CORS above auth.** A browser's preflight `OPTIONS` carries no credential. Auth
+  above CORS answers every preflight with a 401, and the browser reports it as a CORS
+  failure, so the frontend team debugs the wrong service for an afternoon.
+- **Auth innermost.** Nothing sits between it and the handler, so nothing can drop or
+  overwrite the identity it put in the context.
 
 ```go
-// internal/httpx/middleware.go
-package httpx
+// internal/middleware/recovery.go
+package middleware
 
 import (
-	"encoding/binary"
-	"encoding/hex"
-	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"runtime/debug"
-	"strings"
-	"time"
 
-	"example.internal/svc/internal/auth"
-	"example.internal/svc/internal/domain"
+	"example.com/users-service/internal/helpers"
+	"example.com/users-service/pkg/logger"
+
+	"github.com/gin-gonic/gin"
 )
 
-const HeaderRequestID = "X-Request-Id"
-
-func Recover(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				rec := recover()
-				if rec == nil {
-					return
-				}
-				// net/http panics with this value on purpose to abandon a
-				// connection. Swallowing it turns the server's own control flow
-				// into a bogus 500 and leaves the connection half-dead.
-				if rec == http.ErrAbortHandler {
-					panic(rec)
-				}
-				log.Error("handler panicked",
-					"panic", rec,
-					"method", r.Method,
-					"path", r.URL.Path,
-					"request_id", requestIDOf(w, r),
-					"stack", string(debug.Stack()),
-				)
-				RespondError(w, r, domain.ErrInternal)
-			}()
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-func RequestID() func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := sanitiseID(r.Header.Get(HeaderRequestID))
-			if id == "" {
-				id = newID()
-			}
-			// Set on the response BEFORE the handler runs. Recover sits outside this
-			// middleware, so its deferred closure only ever holds the request from
-			// before this line replaced it - the context id is unreachable from
-			// there. The header is the same object in both frames, which is why
-			// requestIDOf falls back to it.
-			w.Header().Set(HeaderRequestID, id)
-			next.ServeHTTP(w, r.WithContext(WithRequestID(r.Context(), id)))
-		})
-	}
-}
-
-// An inbound id is a client writing directly into your log pipeline. Unbounded and
-// unfiltered, that is log injection and a bill nobody budgeted.
-func sanitiseID(s string) string {
-	if len(s) == 0 || len(s) > 64 {
-		return ""
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		ok := c == '-' || c == '_' ||
-			(c >= '0' && c <= '9') ||
-			(c >= 'a' && c <= 'z') ||
-			(c >= 'A' && c <= 'Z')
-		if !ok {
-			return ""
-		}
-	}
-	return s
-}
-
-// Correlation, not a secret. math/rand/v2's top-level functions are safe for
-// concurrent use, and a request id nobody authenticates does not need crypto/rand's
-// syscall on every request.
-func newID() string {
-	var b [16]byte
-	binary.LittleEndian.PutUint64(b[0:8], rand.Uint64())
-	binary.LittleEndian.PutUint64(b[8:16], rand.Uint64())
-	return hex.EncodeToString(b[:])
-}
-
-func Logging(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Probes are not traffic. Two of them at two-second intervals is 86,400
-			// lines a day that describe nothing, and they price your log bill and
-			// bury the line you were looking for.
-			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			ctx, slot := withErrSlot(r.Context())
-			r = r.WithContext(ctx)
-
-			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-			start := time.Now()
-			next.ServeHTTP(sw, r)
-
-			attrs := []any{
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", sw.status,
-				"bytes", sw.bytes,
-				"took", time.Since(start),
-				"request_id", RequestIDFrom(r.Context()),
-			}
-			if slot.err != nil {
-				attrs = append(attrs, "err", slot.err.Error())
-			}
-
-			switch {
-			case sw.status >= 500:
-				log.Error("request failed", attrs...)
-			case sw.status >= 400:
-				log.Warn("request rejected", attrs...)
-			default:
-				log.Info("request", attrs...)
-			}
-		})
-	}
-}
-
-// statusWriter exists because net/http will not tell you what status it sent.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-	wrote  bool
-}
-
-func (w *statusWriter) WriteHeader(code int) {
-	if w.wrote {
-		return // the second WriteHeader is a bug; do not make it a log line per request
-	}
-	w.wrote = true
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *statusWriter) Write(b []byte) (int, error) {
-	w.wrote = true // an implicit 200; the default in the struct literal is already right
-	n, err := w.ResponseWriter.Write(b)
-	w.bytes += n
-	return n, err
-}
-
-// Unwrap is what lets http.ResponseController reach the real writer. Without it a
-// wrapped writer silently breaks Flush and Hijack, and the bug shows up on exactly
-// one endpoint - the streaming one, months later, with no obvious cause.
-func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func RequireAuth(secret string, log *slog.Logger) func(http.Handler) http.Handler {
-	v := auth.NewVerifier(secret) // built once, not per request
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || raw == "" {
-				RespondError(w, r, auth.ErrMalformed)
-				return
-			}
-			c, err := v.Verify(raw, time.Now())
-			if err != nil {
-				RespondError(w, r, err)
-				return
-			}
-			id := Identity{UserID: c.Sub, TenantID: c.Tenant, Role: c.Role}
-			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
-		})
-	}
+// Recovery replaces gin.Recovery. Same job - a panic becomes a 500 instead of a dead
+// process - but the 500 goes through the envelope, carries a reference, and the stack
+// goes to the log under that reference instead of to stderr in gin's own format.
+func Recovery() gin.HandlerFunc {
+	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
+		ref := helpers.NewErrorRef()
+		logger.Logger.WithFields(map[string]any{
+			"reference": ref,
+			"method":    c.Request.Method,
+			"path":      c.FullPath(), // the route pattern, not the raw URL with its query
+			"panic":     recovered,
+			"stack":     string(debug.Stack()),
+		}).Error("handler panicked")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, helpers.GenericErrorBody(ref))
+	})
 }
 ```
-
-### The probes are two endpoints, not one
 
 ```go
-// internal/httpx/health.go
-package httpx
+// internal/middleware/access_log.go
 
-import (
-	"net/http"
-	"sync/atomic"
-
-	"example.internal/svc/internal/domain"
-)
-
-type statusDTO struct {
-	Status string `json:"status"`
+// sensitiveQueryParams are never written to the access log in plaintext. gin's default
+// formatter logs the raw path with its query string, and a secret in a query string is
+// a secret in every log aggregator, every backup of it, and every screenshot of a
+// dashboard someone pastes into a chat.
+var sensitiveQueryParams = map[string]struct{}{
+	"secret": {}, "token": {}, "api_token": {}, "password": {}, "key": {}, "apikey": {},
 }
 
-// Health answers for the process and nothing else. Liveness that pings the database
-// restarts every replica during a database blip, which turns a thirty-second
-// dependency wobble into a full outage that you caused and the database did not.
-func Health() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		RespondOK(w, r, http.StatusOK, statusDTO{Status: "alive"})
-	}
-}
-
-// Ready is the flag run flips before it closes the listener. The 503 is what makes
-// the drain in references/composition-and-lifecycle.md work: the load balancer stops
-// routing here while the listener is still open, so the in-flight requests finish
-// and the next ones never arrive.
-func Ready(ready *atomic.Bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !ready.Load() {
-			RespondError(w, r, domain.ErrUnavailable)
-			return
-		}
-		RespondOK(w, r, http.StatusOK, statusDTO{Status: "ready"})
-	}
+func AccessLog() gin.HandlerFunc {
+	return gin.LoggerWithConfig(gin.LoggerConfig{
+		Formatter: redactingFormatter, // gin's line format, path rebuilt with values redacted
+		SkipPaths: []string{"/healthz"},
+	})
 }
 ```
 
-Both go through the envelope. There is no carve-out, because a carve-out is how the
-second one starts.
+The redacting formatter mirrors `gin.defaultLogFormatter` field for field and builds
+the path from `param.Request.URL` with each sensitive value replaced by `REDACTED`. It
+cannot use `param.Path`: gin precomputes that from the raw, unredacted query.
+
+`SkipPaths` drops the probe. A probe every two seconds is 43,200 lines a day that
+describe nothing and bury the line you were looking for.
+
+`CORS` reads its allowed origins from `Config` (exact matches plus `https://*.domain`
+suffix patterns, with a non-empty subdomain required between them), answers `OPTIONS`
+with 204, and allows `*` only when `Env` is local. `SecureHeaders` sets
+`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a `default-src 'self'`
+CSP on every response. Neither has an opinion worth a page.
 
 ## The handler's four moves
 
 **Parse. Validate. Delegate. Respond.** In that order, once each, and nothing else.
 
 ```go
-// internal/order/handler.go
-package order
+// internal/resources/holidays_resource/holidays.handler.go
+package holidaysresource
 
-type Handler struct{ svc *Service }
+import (
+	"example.com/users-service/internal/contracts"
+	"example.com/users-service/internal/helpers"
+	"example.com/users-service/internal/middleware"
+	holidaysresource_dto "example.com/users-service/internal/resources/holidays_resource/dto"
 
-// The handler holds the concrete service from the same feature folder. There is no
-// interface seam here and no test for this function in isolation, because after the
-// rule below there is nothing in it worth mocking: it has no behaviour of its own.
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+	"github.com/gin-gonic/gin"
+)
 
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var req createOrderRequest
-	if err := httpx.DecodeJSON(w, r, &req); err != nil { // parse
-		httpx.RespondError(w, r, err)
-		return
-	}
-	if err := req.Validate(); err != nil { // validate: shape only
-		httpx.RespondError(w, r, err)
-		return
-	}
-	id, ok := httpx.IdentityFrom(r.Context())
-	if !ok {
-		httpx.RespondError(w, r, domain.ErrUnauthenticated)
-		return
-	}
-
-	// The tenant is an argument, not a field. See the end of this file for why the
-	// input struct is not allowed to carry one.
-	sc := domain.Scope{TenantID: id.TenantID}
-	out, err := h.svc.Create(r.Context(), sc, CreateOrder{ // delegate
-		ActorID:    id.UserID,
-		ActorRole:  id.Role,
-		CustomerID: req.CustomerID,
-		SKU:        req.SKU,
-		Qty:        req.Qty,
-	})
+// AddHoliday godoc
+// @Summary     Mark a date as a holiday for a user
+// @Tags        holidays
+// @Accept      json
+// @Produce     json
+// @Param       user_id path int true "Parent user ID"
+// @Param       body body holidaysresource_dto.CreateHolidayDTO true "Holiday"
+// @Success     201 {object} swagger.HolidayEnvelope
+// @Failure     400 {object} swagger.ErrorEnvelope
+// @Failure     409 {object} swagger.ErrorEnvelope
+// @Security    InternalSecret
+// @Router      /holidays/user/{user_id} [post]
+func (h *HolidaysHandlerImpl) AddHoliday(c *gin.Context) {
+	// parse: the path
+	parentUserID, err := helpers.PathID(c, "user_id")
 	if err != nil {
-		httpx.RespondError(w, r, err)
+		c.JSON(helpers.RespondServiceError(err))
 		return
 	}
-	httpx.RespondOK(w, r, http.StatusCreated, toOrderDTO(out)) // respond
+
+	// parse + validate shape: the body
+	var input holidaysresource_dto.CreateHolidayDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(helpers.RespondServiceError(helpers.BindingError(err)))
+		return
+	}
+
+	// delegate
+	holiday, err := h.service.AddHoliday(parentUserID, input)
+	if err != nil {
+		c.JSON(helpers.RespondServiceError(err))
+		return
+	}
+
+	// respond
+	c.JSON(helpers.RespondCreated("holiday added", &gin.H{"holiday": toHolidayResponseDTO(holiday)}))
+}
+
+// ListMyHolidays is the user-facing twin: the same service method, the tenant taken
+// from the token instead of the path.
+func (h *HolidaysHandlerImpl) ListMyHolidays(c *gin.Context) {
+	id, ok := middleware.IdentityFrom(c)
+	if !ok {
+		// Unreachable while this route is mounted under RequireValidJWT. It is here
+		// because "unreachable" is a claim about the wiring, and the day someone mounts
+		// this handler on the public group, a 401 is the failure you want - not a zero
+		// tenant id reading somebody else's rows.
+		c.JSON(helpers.RespondServiceError(contracts.ErrUnauthenticated))
+		return
+	}
+
+	var query holidaysresource_dto.HolidayListQueryDTO
+	if err := c.ShouldBindQuery(&query); err != nil {
+		c.JSON(helpers.RespondServiceError(helpers.BindingError(err)))
+		return
+	}
+
+	// The token's user_id IS the parent user, the tenant. owner_account_id, where a
+	// table has one, is id.AccountID.
+	result, err := h.service.ListHolidays(id.UserID, query)
+	if err != nil {
+		c.JSON(helpers.RespondServiceError(err))
+		return
+	}
+	c.JSON(helpers.RespondPaginated("holidays retrieved", toHolidayResponseDTOs(result.Items),
+		result.Page, result.Limit, int(result.TotalCount)))
 }
 ```
+
+Every `if` above is an early return from a failed parse or a failed call. That is the
+whole shape. Notice what is not there: no `err.Error()`, no status code chosen by the
+handler, no `if errors.Is(...)` ladder. The handler does not know which failures exist,
+which is why adding one never edits a handler.
 
 ### No branch in a handler may change an outcome
 
-Every `if` above is an early return from a failed parse. Not one of them picks a
-different answer for a request that is valid. That is the line, and it is not "no
-`if` statements" - it is that a valid request has exactly one path through this
-function.
+The line is not "no `if` statements". It is that **a valid request has exactly one path
+through the handler.**
 
 ```go
-// ✘ A pricing rule, living in one entry point.
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+// ✘ A business rule, living in one entry point.
+func (h *HolidaysHandlerImpl) AddHoliday(c *gin.Context) {
 	...
-	unit, err := h.svc.store.PriceOf(r.Context(), sc, req.SKU)
-	if err != nil {
-		httpx.RespondError(w, r, err)
+	if config.GlobalConfig.Env == "prod" && input.HolidayDate < time.Now().Format("2006-01-02") {
+		c.JSON(helpers.RespondError("cannot add a holiday in the past", nil, 400))
 		return
 	}
-	if unit*int64(req.Qty) > 100_000 && id.Role != "wholesale" {
-		httpx.RespondError(w, r, domain.ErrForbidden)
-		return
-	}
-	out, err := h.svc.Create(r.Context(), sc, CreateOrder{...}) // delegate, finally
+	holiday, err := h.service.AddHoliday(parentUserID, input)
 	...
 }
 ```
 
-The importer creates orders. The queue consumer that replays a failed order creates
-orders. The admin endpoint creates orders. None of them go through this function, so
-three of the four paths do not have the limit and never had it. No test fails, because
-the test for this rule is a handler test and the handler still passes it. You find out
-from an invoice.
+The CSV importer adds holidays. The admin backfill adds holidays. The worker that copies
+a team's calendar adds holidays. None of them go through this function, so three of
+the four paths never had the rule. No test fails, because the test for the rule is a
+handler test and the handler still passes it.
 
-Look at what the handler had to do to get its branch: reach through the service for a
-price the service is about to read again one line later, and compute the same total
-twice. That reach is the tell. The price is the server's to resolve (`PriceOf` and the
-paragraph on where the price comes from, in `references/data-layer.md`), and
-`Service.Create` already resolves it - which is where a decision that depends on it
-belongs.
+**Validate means shape, not truth.** `binding:"required"` is shape: a fact about the
+JSON. "Not in the past" is a rule: it depends on the clock and it must hold for the
+importer too. The test is whether the answer can change while the request stays
+byte-identical. If it can, it belongs in the service, and the service returns
+`contracts.WithDetail(contracts.ErrHolidayInPast, "%s has already passed", d)`.
+
+### Binding errors are translated, never echoed
 
 ```go
-const (
-	wholesaleLimitCents = 100_000
-	RoleWholesale       = "wholesale"
+// ✘ The fleet's most common line, and a leak.
+if err := c.ShouldBindJSON(&input); err != nil {
+	c.JSON(helpers.RespondError("Invalid payload", &gin.H{"error": err.Error()}, 400))
+	return
+}
+```
+
+`err.Error()` from the validator reads `Key: 'CreateHolidayDTO.HolidayDate' Error:Field
+validation for 'HolidayDate' failed on the 'required' tag`. That publishes your Go type
+names, and it is useless to the user, who typed into a field labelled "Date". And when
+the message is replaced by a fixed "invalid payload" instead, the user who sent an
+8-character password to an endpoint that wants 12 is told nothing at all, and cannot
+fix it.
+
+`BindingError` gives them the field and the reason, in the wire's vocabulary:
+
+```go
+// internal/helpers/binding.helper.go
+package helpers
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"example.com/users-service/internal/contracts"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
 )
 
-// ✔ The rule is where the decision is made, so every caller gets it: this endpoint,
-// the importer, the consumer, and the one somebody writes next year without reading
-// this file.
-func (s *Service) Create(
-	ctx context.Context,
-	sc domain.Scope,
-	in CreateOrder,
-) (Order, error) {
-	unit, err := s.store.PriceOf(ctx, sc, in.SKU)
-	if err != nil {
-		return Order{}, err
+// RegisterJSONFieldNames makes the validator report `holiday_date`, not
+// `HolidayDate`. Called once from main, before the router serves.
+func RegisterJSONFieldNames() {
+	v, ok := binding.Validator.Engine().(*validator.Validate)
+	if !ok {
+		return
 	}
-	if unit*int64(in.Qty) > wholesaleLimitCents && in.ActorRole != RoleWholesale {
-		return Order{}, fmt.Errorf("%w: over limit requires wholesale", domain.ErrForbidden)
-	}
-	// The transaction, the Insert, the enqueue: references/data-layer.md.
-	...
-}
-```
-
-**Validate means shape, not truth.** `Qty > 0` is validation: it is a fact about the
-JSON. `Qty <= stock` is a business rule: it needs the database and it needs to hold
-for the importer too. The test is whether the answer can change while the request
-stays byte-identical. If it can, it is not the handler's.
-
-```go
-// internal/order/dto.go
-
-// The edge type. It maps to the wire and nowhere else, which is why the storage
-// struct never appears in this file: a storage struct on the wire publishes every
-// field anyone adds to it later, automatically, forever.
-type createOrderRequest struct {
-	CustomerID int64  `json:"customer_id"`
-	SKU        string `json:"sku"`
-	Qty        int    `json:"qty"`
+	v.RegisterTagNameFunc(func(f reflect.StructField) string {
+		for _, tag := range []string{"json", "form"} {
+			name := strings.SplitN(f.Tag.Get(tag), ",", 2)[0]
+			if name != "" && name != "-" {
+				return name
+			}
+		}
+		return f.Name
+	})
 }
 
-// Validate reports every failure at once. Returning the first one turns a six-field
-// form into six round trips and six chances for the client to give up.
-func (r createOrderRequest) Validate() error {
-	f := map[string]string{}
-	if r.CustomerID <= 0 {
-		f["customer_id"] = "required"
+// BindingError turns whatever ShouldBind* returned into a contracts error that
+// RespondServiceError renders as a 400 with per-field reasons. It reports every
+// failing field at once: returning the first one turns a six-field form into six
+// round trips.
+func BindingError(err error) error {
+	var verrs validator.ValidationErrors
+	if errors.As(err, &verrs) {
+		fields := make(map[string]string, len(verrs))
+		for _, fe := range verrs {
+			fields[fe.Field()] = describe(fe)
+		}
+		return contracts.InvalidFields(fields)
 	}
-	if r.SKU == "" {
-		f["sku"] = "required"
+
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return contracts.InvalidFields(map[string]string{
+			typeErr.Field: "must be a " + typeErr.Type.Kind().String(),
+		})
 	}
-	if r.Qty < 1 || r.Qty > 10_000 {
-		f["qty"] = "must be between 1 and 10000"
-	}
-	if len(f) > 0 {
-		return &domain.ValidationError{Fields: f}
-	}
-	return nil
+
+	// Syntax errors, empty bodies, two documents in one body. The decoder's own text
+	// names byte offsets and Go types; the client gets a field it can act on.
+	return contracts.InvalidFields(map[string]string{"body": "must be a single valid JSON object"})
 }
-```
 
-```go
-// internal/httpx/decode.go
-
-const maxBodyBytes = 1 << 20 // 1 MiB
-
-// DecodeJSON is the only way a body enters this service.
-func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	// Unbounded, a 4 GiB POST is an OOM that any client can send, from a laptop,
-	// with curl, on purpose or by accident.
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-
-	// An unknown field is a 400. Silence means a client that misspelled "quantity"
-	// gets a successful order for zero items - and a client that sends "tenant_id"
-	// to an endpoint that has no such field gets no answer at all, when what you
-	// wanted was to find out they tried.
-	dec.DisallowUnknownFields()
-
-	if err := dec.Decode(dst); err != nil {
-		// The decoder's message names Go types and byte offsets. That is your
-		// vocabulary, not the client's, and publishing it publishes your structs.
-		return &domain.ValidationError{Fields: map[string]string{"body": "malformed json"}}
+func describe(fe validator.FieldError) string {
+	switch fe.Tag() {
+	case "required":
+		return "is required"
+	case "min":
+		return "must be at least " + fe.Param()
+	case "max":
+		return "must be at most " + fe.Param()
+	case "oneof":
+		return "must be one of: " + fe.Param()
+	case "email":
+		return "must be a valid email address"
+	default:
+		return fmt.Sprintf("failed the %q check", fe.Tag())
 	}
-	// Two JSON documents in one body is not one request. Accepting the first and
-	// ignoring the second is how a smuggled payload gets ignored by you and counted
-	// by something downstream.
-	if dec.More() {
-		return &domain.ValidationError{Fields: map[string]string{"body": "expected a single json object"}}
+}
+
+// PathID reads a positive integer path parameter, or returns the 400 that says which
+// one was wrong. strconv in every handler is the same five lines written forty times,
+// and one of the forty forgets the `<= 0` check.
+func PathID(c *gin.Context, name string) (int, error) {
+	n, err := strconv.Atoi(c.Param(name))
+	if err != nil || n <= 0 {
+		return 0, contracts.InvalidFields(map[string]string{name: "must be a positive integer"})
 	}
-	return nil
+	return n, nil
 }
 ```
 
 ## The single envelope
 
-**Every response goes through it. Success, failure, probe, redirect body, all of
-them.** One handler writing bare JSON means every consumer needs two parsers, and
-the second parser is the one that never gets tested because it only runs on the
-error path nobody triggers on purpose.
+**Every response goes through it.** Success, failure, probe, the 404 for an unknown
+route, the 401 from middleware, the 500 from a panic. One handler writing a bare
+`gin.H{"error": ...}` means every consumer needs two parsers, and the second one is the
+one that never gets tested, because it only runs on the error path nobody triggers on
+purpose.
 
-```go
-// internal/httpx/respond.go
-package httpx
+The shape is `{message, data}`:
 
-import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-
-	"example.internal/svc/internal/paging"
-)
-
-// Envelope is the entire public shape of this service. Data is `any` because the
-// envelope is generic over its payload - what goes IN it is always a typed DTO,
-// never a map. A map[string]any here would move the contract out of the compiler
-// and into a wiki page.
-type Envelope struct {
-	Success bool       `json:"success"`
-	Data    any        `json:"data,omitempty"`
-	Error   *ErrorBody `json:"error,omitempty"`
-	Meta    *Meta      `json:"meta,omitempty"`
-}
-
-// Code is stable and machine-readable; Message is for a human reading a log.
-// Clients branch on Code. If they have to branch on Message you can never reword
-// it, and you will want to.
-type ErrorBody struct {
-	Code    string            `json:"code"`
-	Message string            `json:"message"`
-	Fields  map[string]string `json:"fields,omitempty"`
-}
-
-type Meta struct {
-	RequestID string    `json:"request_id"`
-	Page      *PageMeta `json:"page,omitempty"`
-}
-
-type PageMeta struct {
-	Page       int   `json:"page"`
-	PageSize   int   `json:"page_size"`
-	Total      int64 `json:"total"`
-	TotalPages int   `json:"total_pages"`
-	HasNext    bool  `json:"has_next"`
-}
-
-func RespondOK(w http.ResponseWriter, r *http.Request, status int, data any) {
-	write(w, r, status, Envelope{
-		Success: true,
-		Data:    data,
-		Meta:    &Meta{RequestID: requestIDOf(w, r)},
-	})
-}
-
-// RespondPage is RespondOK with the page block filled in. It exists so that no
-// handler ever assembles that block by hand: two handlers computing total_pages is
-// two rounding rules, and the client's "next" button breaks on whichever one got it
-// wrong.
-func RespondPage[T any](w http.ResponseWriter, r *http.Request, data any, p paging.Page[T]) {
-	write(w, r, http.StatusOK, Envelope{
-		Success: true,
-		Data:    data,
-		Meta: &Meta{
-			RequestID: requestIDOf(w, r),
-			Page: &PageMeta{
-				Page:       p.Page,
-				PageSize:   p.Size,
-				Total:      p.Total,
-				TotalPages: p.TotalPages,
-				HasNext:    p.HasNext,
-			},
-		},
-	})
-}
-
-func RespondError(w http.ResponseWriter, r *http.Request, err error) {
-	status, body := statusFor(err)
-
-	// The cause goes to the log, once, on the request's own line. The handler knows
-	// the error and the middleware knows the status and the duration; the slot joins
-	// them. The alternative is RespondError logging by itself, which needs either a
-	// logger threaded through every handler signature or a global one - and the
-	// global is exactly what the composition root exists to abolish.
-	recordErr(r.Context(), err)
-
-	write(w, r, status, Envelope{
-		Success: false,
-		Error:   &body,
-		Meta:    &Meta{RequestID: requestIDOf(w, r)},
-	})
-}
-
-func write(w http.ResponseWriter, r *http.Request, status int, env Envelope) {
-	// Marshal BEFORE WriteHeader. json.NewEncoder(w).Encode after the status is on
-	// the wire cannot fail usefully: the client already has a 200 and now gets half
-	// an object, with no way to tell that from a truncated connection.
-	buf, err := json.Marshal(env)
-	if err != nil {
-		recordErr(r.Context(), fmt.Errorf("marshal envelope: %w", err))
-		buf = []byte(`{"success":false,"error":{"code":"internal","message":"internal error"}}`)
-		status = http.StatusInternalServerError
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-	_, _ = w.Write(buf) // the client hung up; there is nobody left to tell
-}
+```json
+{ "message": "holiday added", "data": { "holiday": { "id": 41, "holiday_date": "2026-12-25", "name": "Christmas Day", "is_active": true } } }
 ```
 
-### The domain-error map lives in exactly one function
-
-```go
-// internal/domain/errors.go
-package domain
-
-import "errors"
-
-// The vocabulary of failure for this service. Every layer speaks these; only this
-// file defines them. A store returns ErrNotFound, a service wraps it with context,
-// and the HTTP layer maps it once - which is the whole reason the map below can be
-// one function instead of one guess per handler.
-var (
-	ErrInvalid         = errors.New("invalid")
-	ErrUnauthenticated = errors.New("unauthenticated")
-	ErrForbidden       = errors.New("forbidden")
-	ErrNotFound        = errors.New("not found")
-	ErrConflict        = errors.New("conflict")
-	ErrUnavailable     = errors.New("unavailable")
-	ErrInternal        = errors.New("internal")
-)
-
-// ValidationError carries the per-field detail a sentinel cannot. It satisfies
-// errors.Is(err, ErrInvalid) as well, so a caller that does not care about fields
-// does not have to know this type exists.
-type ValidationError struct {
-	Fields map[string]string
-}
-
-func (e *ValidationError) Error() string        { return "validation failed" }
-func (e *ValidationError) Is(target error) bool { return target == ErrInvalid }
+```json
+{ "message": "holidays retrieved",
+  "data": [ { "id": 41, "holiday_date": "2026-12-25", "name": "Christmas Day", "is_active": true } ],
+  "pagination": { "current_page": 1, "per_page": 10, "total_count": 1, "total_pages": 1,
+                  "has_next_page": false, "has_prev_page": false } }
 ```
 
+```json
+{ "message": "the request is not valid", "data": { "fields": { "holiday_date": "is required" } } }
+```
+
+```json
+{ "message": "An unexpected error occurred. Please try again or contact support.", "reference": "9f3c1a2b" }
+```
+
+- **A single resource is an object keyed by its name**: `data.holiday`, `data.profile`.
+  The key is what lets a response grow a second top-level field (`data.a2p_status`
+  beside `data.profile`) without breaking any client.
+- **A list is `data` itself, an array, with `pagination` beside it.** Always an array,
+  never `null`: a nil slice marshals to `null`, and `null` where a client's type says
+  array is a crash in every strictly-typed client, on the empty-result path nobody
+  demos. Response slices are built with `make([]T, 0, n)`.
+- **What goes inside `data` is a typed DTO.** `gin.H` is the envelope's container, not
+  a payload type: `&gin.H{"holiday": dto}` is fine, `&gin.H{"holiday": gin.H{"id": ...}}`
+  is a contract nobody can read.
+
 ```go
-// internal/httpx/status.go
-package httpx
+// internal/helpers/http_response.go
+package helpers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 
-	"example.internal/svc/internal/domain"
+	"example.com/users-service/internal/contracts"
+	"example.com/users-service/pkg/logger"
+
+	"github.com/gin-gonic/gin"
 )
 
-// statusFor is the ONLY place in this service where an error becomes a status code.
-// One function, so a rename of the map is a diff of one function, and so nobody has
-// to grep for what a 409 means.
-func statusFor(err error) (int, ErrorBody) {
-	// errors.As before errors.Is: ValidationError also matches ErrInvalid, and the
-	// version with fields is strictly more useful than the version without.
-	var ve *domain.ValidationError
-	if errors.As(err, &ve) {
-		return http.StatusBadRequest, ErrorBody{
-			Code:    "invalid",
-			Message: "request is not valid",
-			Fields:  ve.Fields,
+const genericClientError = "An unexpected error occurred. Please try again or contact support."
+
+func RespondOk(message string, data *gin.H) (int, gin.H) {
+	return http.StatusOK, gin.H{"message": message, "data": data}
+}
+
+func RespondCreated(message string, data *gin.H) (int, gin.H) {
+	return http.StatusCreated, gin.H{"message": message, "data": data}
+}
+
+// RespondPaginated is the only way a list leaves this service. It exists so that no
+// handler ever assembles the pagination block by hand: two handlers computing
+// total_pages is two rounding rules, and the client's "next" button breaks on
+// whichever one got it wrong.
+func RespondPaginated(message string, data any, page, limit, totalCount int) (int, gin.H) {
+	return http.StatusOK, gin.H{
+		"message":    message,
+		"data":       data,
+		"pagination": BuildPaginationMeta(page, limit, totalCount),
+	}
+}
+
+// RespondError writes a refusal whose message is a LITERAL the caller wrote: the 401
+// in an auth middleware, the 404 for an unknown route. It never receives err.Error().
+// An error value reaches the wire through RespondServiceError, and only through it.
+func RespondError(message string, data *gin.H, code int) (int, gin.H) {
+	body := gin.H{"message": message}
+	if data != nil {
+		body["data"] = data
+	}
+	return code, body
+}
+
+// RespondServiceError is the ONLY place in this service where an error becomes a
+// status code and a client message. See "One function maps an error to a response".
+func RespondServiceError(err error) (int, gin.H) {
+	var ce *contracts.Error
+	if errors.As(err, &ce) {
+		status := statusForKind(ce.Kind)
+		body := gin.H{"message": ce.Message}
+		if len(ce.Fields) > 0 {
+			body["data"] = gin.H{"fields": ce.Fields}
 		}
+		// The full chain - every %w context a layer added - goes to the log. The client
+		// got ce.Message, which a human wrote for them.
+		if status >= http.StatusInternalServerError {
+			logger.Logger.WithError(err).Warn("request refused: dependency unavailable")
+		} else {
+			logger.Logger.WithError(err).Info("request refused")
+		}
+		return status, body
 	}
 
-	switch {
-	case errors.Is(err, domain.ErrInvalid):
-		return http.StatusBadRequest, ErrorBody{Code: "invalid", Message: "request is not valid"}
-	case errors.Is(err, domain.ErrUnauthenticated):
-		return http.StatusUnauthorized, ErrorBody{Code: "unauthenticated", Message: "authentication required"}
-	case errors.Is(err, domain.ErrForbidden):
-		return http.StatusForbidden, ErrorBody{Code: "forbidden", Message: "not permitted"}
-	case errors.Is(err, domain.ErrNotFound):
-		return http.StatusNotFound, ErrorBody{Code: "not_found", Message: "resource does not exist"}
-	case errors.Is(err, domain.ErrConflict):
-		return http.StatusConflict, ErrorBody{Code: "conflict", Message: "resource already exists"}
-	case errors.Is(err, domain.ErrUnavailable):
-		return http.StatusServiceUnavailable, ErrorBody{Code: "unavailable", Message: "temporarily unavailable"}
+	// Unclassified: something this service never declared a sentinel for. The client
+	// gets a fixed sentence and a reference; the cause goes to the log under the same
+	// reference, so support can find it from a screenshot.
+	ref := NewErrorRef()
+	logger.Logger.WithError(err).WithField("reference", ref).Error("unclassified error")
+	return http.StatusInternalServerError, GenericErrorBody(ref)
+}
+
+func GenericErrorBody(ref string) gin.H {
+	return gin.H{"message": genericClientError, "reference": ref}
+}
+
+func statusForKind(k contracts.ErrorKind) int {
+	switch k {
+	case contracts.KindInvalid:
+		return http.StatusBadRequest
+	case contracts.KindUnauthenticated:
+		return http.StatusUnauthorized
+	case contracts.KindForbidden:
+		return http.StatusForbidden
+	case contracts.KindNotFound:
+		return http.StatusNotFound
+	case contracts.KindConflict:
+		return http.StatusConflict
+	case contracts.KindUnavailable:
+		return http.StatusServiceUnavailable
 	default:
-		// Unmapped is 500, and 500 says nothing. An error that reached here is one
-		// this service never classified: the client gets a code it can retry on and
-		// you get the cause in the log, with the request id, where it belongs.
-		return http.StatusInternalServerError, ErrorBody{Code: "internal", Message: "internal error"}
+		return http.StatusInternalServerError
 	}
+}
+
+// NewErrorRef is correlation, not a secret: eight hex characters a user can read
+// aloud to support.
+func NewErrorRef() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(b)
 }
 ```
 
-Note the three properties that make this hold: `errors.Is` matches through
-`fmt.Errorf("%w", ...)`, so a service is free to wrap with context; the sentinels are
-values, not strings, so the compiler finds every use; and the mapping is total,
-because the `default` exists.
+## One function maps an error to a response
+
+Services return **sentinel errors declared in `internal/contracts/errors.go`**. Each
+sentinel carries its kind (which decides the status) and its message (which a human
+wrote for the client). `RespondServiceError` maps the kind to a status in one switch.
+Nothing else in the service chooses a status for an error, and nothing else decides
+what a client may read.
+
+```go
+// internal/contracts/errors.go
+package contracts
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// ErrorKind is what a failure IS, from the client's side. It decides the status code;
+// helpers.statusForKind is the only place that knows the mapping.
+type ErrorKind int
+
+const (
+	KindInvalid ErrorKind = iota + 1
+	KindUnauthenticated
+	KindForbidden
+	KindNotFound
+	KindConflict
+	KindUnavailable
+)
+
+// Error is a failure this service has a sentence for. Message is client-safe BY
+// CONSTRUCTION: it is a literal somebody wrote in this file, or a detail somebody
+// formatted deliberately with WithDetail. It is never a driver's text, a peer's stack,
+// or err.Error() of anything.
+type Error struct {
+	Kind    ErrorKind
+	Message string
+	Fields  map[string]string // per-field reasons, for KindInvalid
+	parent  *Error            // the sentinel this was derived from, for errors.Is
+}
+
+func (e *Error) Error() string { return e.Message }
+
+// Unwrap is what makes errors.Is(err, ErrSeatsExhausted) true for a WithDetail error
+// built from it. The nil check is not decoration: returning a nil *Error as an error
+// interface is a non-nil error, and errors.Is would walk into it.
+func (e *Error) Unwrap() error {
+	if e.parent == nil {
+		return nil
+	}
+	return e.parent
+}
+
+func Invalid(msg string) *Error         { return &Error{Kind: KindInvalid, Message: msg} }
+func Unauthenticated(msg string) *Error { return &Error{Kind: KindUnauthenticated, Message: msg} }
+func Forbidden(msg string) *Error       { return &Error{Kind: KindForbidden, Message: msg} }
+func NotFound(msg string) *Error        { return &Error{Kind: KindNotFound, Message: msg} }
+func Conflict(msg string) *Error        { return &Error{Kind: KindConflict, Message: msg} }
+func Unavailable(msg string) *Error     { return &Error{Kind: KindUnavailable, Message: msg} }
+
+// WithDetail derives an error from a sentinel with a detail the user can act on: the
+// number of seats the plan has, the length the password needs. errors.Is still matches
+// the sentinel, so callers that branch on it are unaffected.
+func WithDetail(sentinel *Error, format string, args ...any) *Error {
+	return &Error{
+		Kind:    sentinel.Kind,
+		Message: sentinel.Message + ": " + fmt.Sprintf(format, args...),
+		parent:  sentinel,
+	}
+}
+
+// InvalidFields is a validation failure with a reason per field.
+func InvalidFields(fields map[string]string) *Error {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+" "+fields[k])
+	}
+	return &Error{
+		Kind:    KindInvalid,
+		Message: ErrInvalidInput.Message + ": " + strings.Join(parts, "; "),
+		Fields:  fields,
+		parent:  ErrInvalidInput,
+	}
+}
+
+// Cross-cutting sentinels.
+var (
+	ErrInvalidInput    = Invalid("the request is not valid")
+	ErrUnauthenticated = Unauthenticated("authentication required")
+	ErrForbidden       = Forbidden("you do not have access to this")
+	ErrUnavailable     = Unavailable("this is temporarily unavailable, please try again")
+
+	// Internal, deliberately NOT a *Error: it has no client sentence because a client
+	// can do nothing about it. It reaches the wire as the generic 500 with a reference.
+	ErrMissingTenantScope = errors.New("query has no tenant scope")
+
+	// Marks a failure that will fail identically on every retry: a job wraps it and
+	// the queue dead-letters at once (references/background-work.md); a webhook
+	// handler wraps it and answers 200 (references/inter-service.md).
+	ErrNonRetryable = errors.New("non-retryable")
+)
+
+// One block per resource, named Err<Resource><What>, written for the person who will
+// read it in the UI.
+var (
+	ErrHolidayNotFound      = NotFound("holiday not found")
+	ErrHolidayAlreadyExists = Conflict("a holiday already exists on that date")
+	ErrHolidayInPast        = Invalid("that holiday has already passed")
+
+	ErrSeatsExhausted = Conflict("your plan does not include additional user seats")
+)
+```
+
+Used in a service:
+
+```go
+// The detail is formatted on purpose, at the call site that knows the number.
+if used >= plan.Seats {
+	return contracts.WithDetail(contracts.ErrSeatsExhausted,
+		"it includes %d and all are in use, upgrade your plan to add more users", plan.Seats)
+}
+
+// Context for the LOG is added with %w, freely. The client still reads the
+// sentinel's message, because RespondServiceError reads ce.Message and never
+// err.Error() of the chain.
+if helpers.IsNotFound(err) {
+	return nil, fmt.Errorf("remove holiday %d for user %d: %w", holidayID, parentUserID, contracts.ErrHolidayNotFound)
+}
+```
+
+Three properties make this hold:
+
+- **`errors.As` and `errors.Is` see through `%w`**, so any layer is free to wrap with
+  context and the mapping still finds the sentinel.
+- **The message is written for the client, once, in one file.** A reviewer reading
+  `errors.go` is reading every sentence this service can say to a user when something
+  goes wrong. That is the review that catches "pq: duplicate key", and it is a review
+  of one file.
+- **The mapping is total.** Anything that is not a `*contracts.Error` is a 500 with a
+  generic sentence and a reference. A new failure mode that nobody classified is safe
+  by default, and loud in the log.
 
 ### What it replaces
 
 ```go
-// ✘ The mapping, scattered, done on the error's prose.
-func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	o, err := h.svc.Get(r.Context(), id)
-	if err != nil {
-		if err.Error() == "not found" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(o)
+// ✘ Three ways the fleet's handlers decide what a client reads.
+c.JSON(helpers.RespondError(err.Error(), nil, http.StatusBadRequest))
+
+c.JSON(helpers.RespondError("failed to create", &gin.H{"error": err.Error()}, 500))
+
+// and, in RespondError itself, a scrubber:
+for _, sig := range []string{"pq:", "gorm", "duplicate key", "violates", ...} {
+	if strings.Contains(strings.ToLower(message), sig) { message = genericClientError }
 }
 ```
 
-Four separate failures in nine lines:
-
-- **The string compare is a contract nobody signed.** The day someone writes
-  `fmt.Errorf("load order %d: %w", id, err)` the message stops being `"not found"`,
-  the 404 silently becomes a 500, no test fails, and the client starts retrying a
-  request that can never succeed.
-- **`err.Error()` on the wire is a leak.** The driver's words are not words you
-  chose to publish: `pq: duplicate key value violates unique constraint
-  "users_tenant_id_email_key"` hands an attacker your table name, your column names,
-  your uniqueness rules, and confirmation that the email exists. **Never return a raw
-  database or third-party error to a client.** The client gets a code from the map
-  above. The cause goes to the log.
-- **`http.Error` writes `text/plain`.** Two of the three paths here are outside the
-  envelope, so a client parsing JSON gets a parse error instead of your error.
-- **The success path encodes the storage struct.** Every column anyone adds to
-  `Order` from now on is published the moment it is added, including the one someone
-  names `internal_margin_cents`.
+- **A blanket 400 with `err.Error()`** makes a dropped database connection the
+  client's fault. The client does not retry a 400, so a transient failure becomes a
+  permanent one, and the text it shows the user is the driver's.
+- **`"error": err.Error()` in `data`** publishes the whole wrap chain: the internal
+  operation names, the ids, the peer's raw response body.
+- **Scrubbing by string-matching is a denylist against text nobody controls.** It is
+  right until the day a driver phrases a constraint violation in a way the list did
+  not anticipate, and on that day it leaks, silently, with every test green. It also
+  fails in the other direction: a legitimate business message that happens to contain
+  "not active" or "already exists" is waved through even when it came from somewhere
+  it should not have. A message is safe because somebody wrote it for a client, not
+  because it failed to match a list.
 
 ## Pagination goes through one executor
 
-`ExecutePaginatedQuery` is how a list leaves this service. Not "for the big tables" -
+`ExecutePaginatedQuery` is how a list leaves this service. Not "for the big tables":
 for all of them. "This table is small" is a statement about today and about your own
 tenants, and the unbounded query is a full scan waiting for the tenant who makes it
 fatal.
 
 ```go
-// internal/paging/paging.go
-package paging
+// internal/helpers/pagination.go
+package helpers
 
 import (
-	"context"
-	"database/sql"
-	"errors"
 	"fmt"
-	"net/url"
-	"strconv"
+	"math"
 
-	"example.internal/svc/internal/domain"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
-	DefaultSize = 25
-	MaxSize     = 100 // the hard ceiling; there is no parameter that raises it
+	DefaultPage  = 1
+	DefaultLimit = 10
+	MaxLimit     = 100 // the hard ceiling; no parameter raises it
 )
 
-type Request struct {
-	Page   int
-	Size   int
-	Column string // resolved from the whitelist, never client text
-	Desc   bool
+type PaginationParams struct {
+	Page  int `form:"page,omitempty" json:"page" example:"1"`
+	Limit int `form:"limit,omitempty" json:"limit" example:"10"`
 }
 
-func (r Request) Offset() int { return (r.Page - 1) * r.Size }
-
-// Sortable is the whitelist, and it is the entire injection defence. There is no
-// placeholder for an identifier - `order by $1` sorts by the constant string $1, not
-// by the column - so a sort column reaches the query as text or not at all. The map's
-// VALUE is what reaches it, and the value was written here, in Go, by you.
-type Sortable struct {
-	Columns map[string]string // client field name -> physical column
-	Default string            // a key of Columns
+type PaginationMeta struct {
+	CurrentPage  int  `json:"current_page"`
+	PerPage      int  `json:"per_page"`
+	TotalCount   int  `json:"total_count"`
+	TotalPages   int  `json:"total_pages"`
+	HasNextPage  bool `json:"has_next_page"`
+	HasPrevPage  bool `json:"has_prev_page"`
+	NextPage     *int `json:"next_page,omitempty"`
+	PreviousPage *int `json:"previous_page,omitempty"`
 }
 
-func Parse(q url.Values, s Sortable) (Request, error) {
-	req := Request{Page: 1, Size: DefaultSize, Desc: true}
-
-	if v := q.Get("page"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return Request{}, &domain.ValidationError{
-				Fields: map[string]string{"page": "must be a positive integer"},
-			}
-		}
-		req.Page = n
-	}
-
-	if v := q.Get("page_size"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return Request{}, &domain.ValidationError{
-				Fields: map[string]string{"page_size": "must be a positive integer"},
-			}
-		}
-		// Clamp, do not reject. A client asking for 10,000 gets 100 and a working
-		// list. What it must never get is 10,000: an unbounded limit is a full read
-		// that any client can trigger on any endpoint, and the tenant who triggers
-		// it will be the one with the most rows and the shortest patience.
-		req.Size = min(n, MaxSize)
-	}
-
-	field := q.Get("sort")
-	if field == "" {
-		field = s.Default
-	}
-	col, ok := s.Columns[field]
-	if !ok {
-		// Rejected, not ignored. Silently sorting by something else returns a
-		// different answer than the one asked for, and a client that asked for
-		// newest-first and got oldest-first reads that as corrupted data.
-		return Request{}, &domain.ValidationError{
-			Fields: map[string]string{"sort": "unknown sort field"},
-		}
-	}
-	req.Column = col
-
-	switch q.Get("order") {
-	case "", "desc":
-		req.Desc = true
-	case "asc":
-		req.Desc = false
-	default:
-		return Request{}, &domain.ValidationError{
-			Fields: map[string]string{"order": "must be asc or desc"},
-		}
-	}
-	return req, nil
-}
-
-// Querier is the smallest thing the executor needs, so a *sql.DB and a *sql.Tx both
-// satisfy it and a paginated list works inside a transaction without a second copy.
-type Querier interface {
-	QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row
-	QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error)
-}
-
-// Spec is the query minus its paging. Every string in it is written by the store.
-// None of them ever come from a request - see Sortable for why that is not a style
-// preference.
-type Spec struct {
-	Select   string // "o.id, o.customer_id, o.total_cents"
-	From     string // "orders o"
-	Where    string // "o.tenant_id = $1" - see the tenancy rule in data-layer.md
-	Args     []any
-	Tiebreak string // a UNIQUE column. Not optional. See below.
-}
-
-type Page[T any] struct {
+// PaginatedResult is generic over the row type, so the caller gets []model.UserHoliday
+// back and not an interface{} it has to assert.
+type PaginatedResult[T any] struct {
 	Items      []T
+	TotalCount int64
 	Page       int
-	Size       int
-	Total      int64
-	TotalPages int
-	HasNext    bool
+	Limit      int
+}
+
+// PaginatedQueryFunc is a GORM scope by another name: the same signature, so
+// TenantScope, a filter and an Order clause all compose the same way.
+type PaginatedQueryFunc = func(db *gorm.DB) *gorm.DB
+
+// NormalizePagination clamps, it does not reject. A client asking for 10,000 gets 100
+// and a working list. What it must never get is 10,000: an unbounded limit is a full
+// read any client can trigger on any endpoint.
+func NormalizePagination(p *PaginationParams) {
+	if p.Page < 1 {
+		p.Page = DefaultPage
+	}
+	if p.Limit < 1 {
+		p.Limit = DefaultLimit
+	}
+	if p.Limit > MaxLimit {
+		p.Limit = MaxLimit
+	}
+}
+
+func ExtractPaginationFromContext(c *gin.Context) (PaginationParams, error) {
+	var p PaginationParams
+	if err := c.ShouldBindQuery(&p); err != nil {
+		return PaginationParams{}, BindingError(err)
+	}
+	NormalizePagination(&p)
+	return p, nil
 }
 
 func ExecutePaginatedQuery[T any](
-	ctx context.Context,
-	db Querier,
-	req Request,
-	spec Spec,
-	scan func(*sql.Rows) (T, error),
-) (Page[T], error) {
-	if spec.Tiebreak == "" {
-		// Refused at the first call, in the first test, by the developer who wrote
-		// it - instead of on page 2, in production, as a duplicate row that support
-		// cannot reproduce.
-		return Page[T]{}, errors.New("paging: spec has no tiebreak column")
+	db *gorm.DB,
+	params PaginationParams,
+	modifiers ...PaginatedQueryFunc,
+) (PaginatedResult[T], error) {
+	NormalizePagination(&params)
+
+	// Modifiers are applied now, in order, not deferred through db.Scopes: the count
+	// below runs on a copy of this statement, and it must be the same scoped,
+	// filtered statement the list runs on.
+	var zero T
+	query := db.Model(&zero)
+	for _, modify := range modifiers {
+		query = modify(query)
 	}
 
-	// Not nil. A nil slice marshals to `null`, and `null` where a client's type says
-	// array is a crash in every strictly-typed client you have - on the empty-result
-	// path, which is the one nobody demos.
-	out := Page[T]{Page: req.Page, Size: req.Size, Items: []T{}}
-
-	countQ := "select count(*) from " + spec.From + " where " + spec.Where
-	if err := db.QueryRowContext(ctx, countQ, spec.Args...).Scan(&out.Total); err != nil {
-		return Page[T]{}, fmt.Errorf("count: %w", err)
+	var total int64
+	// A fresh session so the count does not inherit the limit and offset below. GORM
+	// drops ORDER BY from a count on its own.
+	if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return PaginatedResult[T]{}, fmt.Errorf("count: %w", err)
 	}
 
-	dir := "asc"
-	if req.Desc {
-		dir = "desc"
-	}
-
-	// The tiebreak is appended to every order by, always, in the same direction.
-	args := append(append([]any{}, spec.Args...), req.Size, req.Offset())
-	listQ := fmt.Sprintf(
-		"select %s from %s where %s order by %s %s, %s %s limit $%d offset $%d",
-		spec.Select, spec.From, spec.Where,
-		req.Column, dir, spec.Tiebreak, dir,
-		len(spec.Args)+1, len(spec.Args)+2,
-	)
-
-	rows, err := db.QueryContext(ctx, listQ, args...)
+	items := make([]T, 0, params.Limit)
+	err := query.
+		// The tiebreak, appended after every caller-supplied order, always. Without a
+		// unique last sort key, forty rows sharing a created_at have no defined order,
+		// the database returns them differently per execution, and page 2 repeats rows
+		// from page 1 while skipping others entirely. Nothing errors: the count says 40
+		// and the client assembles 38. The primary key is unique by construction and
+		// indexed by definition.
+		Order(clause.OrderByColumn{Column: clause.Column{Table: clause.CurrentTable, Name: clause.PrimaryKey}}).
+		Offset((params.Page - 1) * params.Limit).
+		Limit(params.Limit).
+		Find(&items).Error
 	if err != nil {
-		return Page[T]{}, fmt.Errorf("list: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		item, err := scan(rows)
-		if err != nil {
-			return Page[T]{}, fmt.Errorf("scan: %w", err)
-		}
-		out.Items = append(out.Items, item)
-	}
-	// rows.Err, always. Without it a connection that dropped mid-iteration returns a
-	// short page and a nil error, and the caller reports the truncated list as the
-	// complete one.
-	if err := rows.Err(); err != nil {
-		return Page[T]{}, fmt.Errorf("rows: %w", err)
+		return PaginatedResult[T]{}, fmt.Errorf("list: %w", err)
 	}
 
-	out.TotalPages = int((out.Total + int64(req.Size) - 1) / int64(req.Size))
-	out.HasNext = req.Page < out.TotalPages
-	return out, nil
+	return PaginatedResult[T]{Items: items, TotalCount: total, Page: params.Page, Limit: params.Limit}, nil
+}
+
+func BuildPaginationMeta(page, limit, totalCount int) PaginationMeta {
+	totalPages := int(math.Ceil(float64(totalCount) / float64(limit)))
+	meta := PaginationMeta{
+		CurrentPage: page,
+		PerPage:     limit,
+		TotalCount:  totalCount,
+		TotalPages:  totalPages,
+		HasNextPage: page < totalPages,
+		HasPrevPage: page > 1,
+	}
+	if meta.HasNextPage {
+		next := page + 1
+		meta.NextPage = &next
+	}
+	if meta.HasPrevPage {
+		prev := page - 1
+		meta.PreviousPage = &prev
+	}
+	return meta
 }
 ```
 
-**Why the tiebreak is mandatory.** `order by created_at desc` over a table where
-forty rows share a timestamp has no defined order among those forty. The database is
-free to return them differently on each execution, and it will, because the plan
-changes with the offset. `limit 25 offset 25` then hands page 2 rows the client
-already saw on page 1, and skips rows that appear on no page at all. Nothing errors.
-The count says 40, the client assembles 38 and does not know which two are missing.
-A unique tiebreak - the primary key, always available, already indexed - removes the
-whole class.
-
-Offset paging still shifts under concurrent inserts: a row added at the head pushes
-one row from page 1 onto page 2. The tiebreak fixes the *undefined* order, not the
-*moving* one. That is a keyset-pagination conversation, and it starts with the
-tiebreak column you already added.
-
-`count(*)` is a second query over the same predicate. That is the price of a total,
-and the price is paid on the same index the list uses.
-
-### Used
+Used, in the service (the tenant scope is `references/data-layer.md`'s):
 
 ```go
-// internal/order/store.go
-
-// Scope is the data layer's tenancy type and SafeDBQuery is its panic boundary; both
-// are defined in references/data-layer.md. Scope is a parameter rather than a
-// convention, so a list with no tenant to scope by does not compile.
-func (s *Store) List(ctx context.Context, sc domain.Scope, req paging.Request) (paging.Page[Order], error) {
-	if err := sc.Validate(); err != nil {
-		return paging.Page[Order]{}, err
+func (s *HolidaysServiceImpl) ListHolidays(
+	parentUserID int,
+	query holidaysresource_dto.HolidayListQueryDTO,
+) (helpers.PaginatedResult[model.UserHoliday], error) {
+	modifiers := []helpers.PaginatedQueryFunc{
+		helpers.TenantScope(parentUserID), // first, always; refuses a zero id
 	}
-	spec := paging.Spec{
-		Select:   "o.id, o.tenant_id, o.customer_id, o.total_cents, o.status, o.created_at",
-		From:     "orders o",
-		Where:    "o.tenant_id = $1",
-		Args:     []any{sc.TenantID},
-		Tiebreak: "o.id", // primary key: unique by construction, indexed by definition
+	if query.IsActive != nil {
+		modifiers = append(modifiers, func(db *gorm.DB) *gorm.DB {
+			return db.Where("is_active = ?", *query.IsActive)
+		})
 	}
+	if query.Year != nil {
+		modifiers = append(modifiers, func(db *gorm.DB) *gorm.DB {
+			return db.Where("holiday_date >= make_date(?, 1, 1) AND holiday_date < make_date(? + 1, 1, 1)",
+				*query.Year, *query.Year)
+		})
+	}
+	modifiers = append(modifiers, func(db *gorm.DB) *gorm.DB {
+		return db.Order("holiday_date ASC")
+	})
 
-	// A list is a query like any other: it goes through SafeDBQuery, so a nil map in
-	// scanOrder is this request's 500 and not the whole process's last act.
-	var page paging.Page[Order]
-	err := dbx.SafeDBQuery(ctx, "order.List", func() error {
+	var result helpers.PaginatedResult[model.UserHoliday]
+	err := helpers.SafeDBQuery(func() error {
 		var err error
-		page, err = paging.ExecutePaginatedQuery(ctx, s.db, req, spec, scanOrder)
+		result, err = helpers.ExecutePaginatedQuery[model.UserHoliday](database.Db, query.PaginationParams, modifiers...)
 		return err
 	})
-	return page, err
-}
-```
-
-```go
-// internal/order/handler.go
-
-// The whitelist is a package var next to the handler that uses it, because it is
-// part of this endpoint's contract: adding a sortable field is an API change.
-var orderSortable = paging.Sortable{
-	Columns: map[string]string{
-		"created_at": "o.created_at",
-		"total":      "o.total_cents",
-	},
-	Default: "created_at",
-}
-
-func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	req, err := paging.Parse(r.URL.Query(), orderSortable)
 	if err != nil {
-		httpx.RespondError(w, r, err)
-		return
+		return helpers.PaginatedResult[model.UserHoliday]{}, fmt.Errorf("list holidays: %w", err)
 	}
-	id, ok := httpx.IdentityFrom(r.Context())
-	if !ok {
-		httpx.RespondError(w, r, domain.ErrUnauthenticated)
-		return
-	}
-
-	page, err := h.svc.List(r.Context(), domain.Scope{TenantID: id.TenantID}, req)
-	if err != nil {
-		httpx.RespondError(w, r, err)
-		return
-	}
-	httpx.RespondPage(w, r, toOrderDTOs(page.Items), page)
+	return result, nil
 }
 ```
 
-```json
-{
-  "success": true,
-  "data": [{ "id": 41, "customer_id": 9, "total_cents": 1200, "status": "paid" }],
-  "meta": {
-    "request_id": "0f9c2ad1c4b74e0a8c7e6b5a4d3c2b1a",
-    "page": { "page": 1, "page_size": 25, "total": 1, "total_pages": 1, "has_next": false }
-  }
-}
-```
+The rules:
+
+- **Filters come from a typed query DTO**, one modifier per filter, each a `Where` with
+  placeholders. A filter value never reaches SQL as text.
+- **A sort the client chooses goes through a whitelist.** A `sort` query parameter is
+  looked up in a `map[string]string` from client field name to column, and an unknown
+  name is a 400, not silently ignored. There is no placeholder for an identifier, so a
+  column name reaches the query as text or not at all, and the map's value is the only
+  text that may.
+- **No endpoint sets `Limit` past the executor.** `paginationParams.Limit = 200` in a
+  handler "because the UI does not paginate" is a second ceiling, and it is the one
+  that will be raised again next quarter. If a screen genuinely needs every row, it is
+  a bounded export with its own endpoint and its own budget, not a list with the
+  ceiling removed.
+- **`count(*)` is a second query over the same predicate.** That is the price of a
+  total, and the index the list uses has to serve it too
+  (`references/data-layer.md`, "Tenancy").
 
 ## Identity comes from the credential, never the payload
 
-The auth middleware verifies the token and puts an `Identity` in the context.
-Handlers read it from there. Nothing else is a source of identity.
+There are two credentials, and each one decides where identity may come from.
+
+**A user's JWT, on user-facing routes.** `RequireValidJWT` verifies the token and puts
+an `Identity` in the Gin context. The handler reads the tenant from there. The DTO has
+no field that could carry it.
 
 ```go
-// ✘ The edge type can express identity, so a client can send it.
-type createOrderRequest struct {
-	TenantID   int64  `json:"tenant_id"`
-	CustomerID int64  `json:"customer_id"`
-	SKU        string `json:"sku"`
-	Qty        int    `json:"qty"`
-}
-
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var req createOrderRequest
-	httpx.DecodeJSON(w, r, &req)
-	// Every field in req came from the internet. TenantID included. Create demands a
-	// Scope and this one is fully populated, so nothing here looks unfinished. This
-	// endpoint now writes into any tenant the caller can guess an integer for, and
-	// the write looks completely legitimate in every log and every audit trail you
-	// have.
-	sc := domain.Scope{TenantID: req.TenantID} // straight off the wire
-	out, err := h.svc.Create(r.Context(), sc, CreateOrder{
-		CustomerID: req.CustomerID,
-		SKU:        req.SKU,
-		Qty:        req.Qty,
-	})
-	...
-}
-```
-
-Nobody writes that on purpose. It arrives by convenience: `Create` demanded a `Scope`,
-the request already had a `tenant_id` on it, and the handler wired the one to the
-other without anybody deciding to. The reviewer sees a populated struct and a
-satisfied compiler.
-
-That is the exact limit of what a required parameter buys. It makes tenancy impossible
-to **forget**, because the call does not compile without one. It says nothing about
-where the value came from. Only the edge type can answer that, by having no such field
-to read.
-
-**The fix is not to remember to overwrite the field. It is that the field must not
-exist.**
-
-```go
-// ✔ The wire type has no tenancy. There is nothing to forge, nothing to overwrite,
-// and nothing to remember - the compiler enforces what code review otherwise has to
-// catch on every diff, forever, including the diffs it does not get shown.
-type createOrderRequest struct {
-	CustomerID int64  `json:"customer_id"`
-	SKU        string `json:"sku"`
-	Qty        int    `json:"qty"`
-}
-
-// The internal input carries what the client asked for. It cannot express tenancy
-// either: that travels beside it, as a Scope the compiler demands at every call.
-type CreateOrder struct {
-	ActorID    int64
-	ActorRole  string
-	CustomerID int64
-	SKU        string
-	Qty        int
-}
-
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var req createOrderRequest
-	if err := httpx.DecodeJSON(w, r, &req); err != nil {
-		httpx.RespondError(w, r, err)
-		return
-	}
-	if err := req.Validate(); err != nil {
-		httpx.RespondError(w, r, err)
-		return
-	}
-	id, ok := httpx.IdentityFrom(r.Context())
-	if !ok {
-		// Unreachable while this route is mounted under RequireAuth. It is here
-		// because "unreachable" is a claim about the wiring, and the day someone
-		// mounts this handler on the public mux, a 401 is the failure you want -
-		// not a zero TenantID reading somebody else's orders.
-		httpx.RespondError(w, r, domain.ErrUnauthenticated)
-		return
-	}
-
-	sc := domain.Scope{TenantID: id.TenantID} // from the credential
-	out, err := h.svc.Create(r.Context(), sc, CreateOrder{
-		ActorID:    id.UserID, // from the credential
-		ActorRole:  id.Role,   // from the credential
-		CustomerID: req.CustomerID,
-		SKU:        req.SKU,
-		Qty:        req.Qty,
-	})
-	if err != nil {
-		httpx.RespondError(w, r, err)
-		return
-	}
-	httpx.RespondOK(w, r, http.StatusCreated, toOrderDTO(out))
-}
-```
-
-The mapping is a few lines of typing that a struct conversion would have saved. Those
-lines are the security boundary. `DisallowUnknownFields` in `DecodeJSON` is the
-second half of it: a client that sends `tenant_id` to this endpoint now gets a 400
-that says the field does not exist, and you get a log line saying somebody tried.
-
-**A struct field can be left zero and still compile. A required parameter cannot be
-left out at all.** That is why `CreateOrder` has no `TenantID` even though nothing on
-the wire could reach it: tenancy inside the input type makes every future
-construction of that struct a place to forget it, and `TenantID: 0` compiles and
-passes review. `Scope.Validate` in `references/data-layer.md` exists because of what
-a zero tenant does the day it finally matches something. Tenancy as a parameter is a
-thing the compiler demands at every call, including the calls written next year by
-someone who never read this file. Same rule as the edge type, one layer in: make the
-wrong version unrepresentable rather than forbidden.
-
-The same rule holds for path and query parameters. `GET /v1/orders/{id}` is not
-authorised by the URL: the store scopes by `sc.TenantID`, so an id belonging to
-another tenant returns `ErrNotFound` and a 404. **Not a 403** - a 403 confirms the
-row exists, which is the fact you were hiding.
-
-**Identity is not the only thing you must never take from the payload.** Anything the
-server owns - the price, the tenant, the status, the timestamps - is a thing a client
-is not permitted to assert. Notice what `createOrderRequest` does not have: a
-`TotalCents`. A `TotalCents` on the wire is a client naming its own price, and it will
-be a zero, or a negative, or a discount nobody authorised. `Service.Create` resolves
-the price from the catalog instead (`references/data-layer.md`), which is why `SKU`
-and `Qty` are the only things this endpoint accepts about what an order is worth. The
-rule is not about identity; identity is just its most dangerous instance.
-
-### The context key is a type
-
-```go
-// internal/httpx/context.go
-package httpx
+// internal/middleware/user_jwt_auth.go
+package middleware
 
 import (
-	"context"
 	"net/http"
+	"strconv"
+	"strings"
+
+	"example.com/users-service/internal/config"
+	"example.com/users-service/internal/helpers"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// An unexported int type. context.WithValue(ctx, "user", u) in two packages is one
-// key: the second write silently overwrites the first, and the reader gets a value
-// of a type it did not expect and asserts against, so the failure is a nil deref in
-// a package that never heard of the writer. Nothing outside this file can construct
-// a ctxKey, so nothing outside this file can collide with it.
-type ctxKey int
+// Unexported: nothing outside this file can write the key, so nothing can overwrite
+// the identity a verified token put there.
+const identityKey = "middleware.identity"
 
-const (
-	ctxKeyIdentity ctxKey = iota
-	ctxKeyRequestID
-	ctxKeyErrSlot
-)
+type UserClaims struct {
+	UserID    int    `json:"user_id"`
+	AccountID string `json:"account_id"`
+	Email     string `json:"email"`
+	Role      string `json:"role"`
+	jwt.RegisteredClaims
+}
 
-// Identity is what the credential proved. It is a value: a handler that receives it
-// cannot widen its own permissions by mutating it.
+// Identity is what the token proved. A value, so a handler that receives it cannot
+// widen its own permissions by mutating it.
 type Identity struct {
-	UserID   int64
-	TenantID int64
-	Role     string
+	UserID    int
+	AccountID int
+	Email     string
+	Role      string
 }
 
-func WithIdentity(ctx context.Context, id Identity) context.Context {
-	return context.WithValue(ctx, ctxKeyIdentity, id)
+func RequireValidJWT() gin.HandlerFunc {
+	// Read once, at construction. LoadConfig already refused to boot without it, so an
+	// empty secret here is impossible - and if it were possible, HMAC with an empty key
+	// verifies tokens anybody can mint.
+	secret := []byte(config.GlobalConfig.JwtSecret)
+
+	return func(c *gin.Context) {
+		raw, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if !ok || raw == "" {
+			c.AbortWithStatusJSON(helpers.RespondError("authorization header must be Bearer <token>", nil, http.StatusUnauthorized))
+			return
+		}
+
+		var claims UserClaims
+		_, err := jwt.ParseWithClaims(raw, &claims,
+			func(*jwt.Token) (any, error) { return secret, nil },
+			// The algorithm is pinned here, by us. Trusting the token's own header is the
+			// alg-confusion family: alg "none", or RS256 downgraded to HS256 and signed
+			// with your public key.
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+			// Absent exp is invalid, not eternal. A token with no expiry is one leak away
+			// from permanent access.
+			jwt.WithExpirationRequired(),
+		)
+		if err != nil {
+			c.AbortWithStatusJSON(helpers.RespondError("invalid or expired token", nil, http.StatusUnauthorized))
+			return
+		}
+
+		// A token that verifies but carries a zero user or an unparseable account is
+		// malformed, not anonymous. Defaulting either to 0 scopes every query in this
+		// request to tenant 0, which matches nothing until the day it matches everything.
+		accountID, err := strconv.Atoi(claims.AccountID)
+		if claims.UserID <= 0 || err != nil || accountID <= 0 {
+			c.AbortWithStatusJSON(helpers.RespondError("invalid or expired token", nil, http.StatusUnauthorized))
+			return
+		}
+
+		c.Set(identityKey, Identity{
+			UserID:    claims.UserID,
+			AccountID: accountID,
+			Email:     claims.Email,
+			Role:      claims.Role,
+		})
+		c.Next()
+	}
 }
 
-// Two returns, not one. An Identity{} zero value with TenantID 0 is indistinguishable
-// from a real one at the call site, and a query scoped to tenant 0 is a query with no
-// tenant scope at all.
-func IdentityFrom(ctx context.Context) (Identity, bool) {
-	id, ok := ctx.Value(ctxKeyIdentity).(Identity)
+// IdentityFrom returns two values, not one. An Identity{} zero value is
+// indistinguishable from a real one at the call site, and a query scoped to user 0 is
+// a query with no scope.
+func IdentityFrom(c *gin.Context) (Identity, bool) {
+	v, ok := c.Get(identityKey)
+	if !ok {
+		return Identity{}, false
+	}
+	id, ok := v.(Identity)
 	return id, ok
 }
-
-func WithRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyRequestID, id)
-}
-
-func RequestIDFrom(ctx context.Context) string {
-	id, _ := ctx.Value(ctxKeyRequestID).(string)
-	return id
-}
-
-// requestIDOf prefers the context and falls back to the response header. Recover
-// sits outside RequestID, so the request its deferred closure holds predates the
-// context that carries the id. The header does not have that problem: it is the same
-// object in both frames.
-func requestIDOf(w http.ResponseWriter, r *http.Request) string {
-	if id := RequestIDFrom(r.Context()); id != "" {
-		return id
-	}
-	return w.Header().Get(HeaderRequestID)
-}
-
-// errSlot carries the cause of a failure from RespondError up to the Logging
-// middleware, which is the only place that knows the status and the duration. Written
-// by the request's own goroutine and read after ServeHTTP returns, so there is no
-// race and no mutex.
-type errSlot struct{ err error }
-
-func withErrSlot(ctx context.Context) (context.Context, *errSlot) {
-	s := &errSlot{}
-	return context.WithValue(ctx, ctxKeyErrSlot, s), s
-}
-
-func recordErr(ctx context.Context, err error) {
-	if s, ok := ctx.Value(ctxKeyErrSlot).(*errSlot); ok && s.err == nil {
-		s.err = err // the first error is the cause; the rest are consequences
-	}
-}
 ```
 
-### The verifier
-
-Identity is only as good as the check that produced it. This is the whole of it,
-using the standard library, because a token check you cannot read is a token check
-you have not audited.
+**The internal secret, on service-to-service routes.** `InternalServicesAuth` proves
+the caller is one of our services. That caller derived the tenant from a credential of
+its own (the BFF from the user's JWT) and passes it in the path, and the path is
+trustworthy for exactly one reason: the caller proved who it is on the line before.
 
 ```go
-// internal/auth/token.go
-package auth
+// internal/middleware/internal_services_auth.go
+package middleware
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"strings"
-	"time"
+	"crypto/subtle"
+	"net/http"
 
-	"example.internal/svc/internal/domain"
+	"example.com/users-service/internal/config"
+	"example.com/users-service/internal/helpers"
+
+	"github.com/gin-gonic/gin"
 )
 
-// Every one of these satisfies errors.Is(err, domain.ErrUnauthenticated), so the
-// status map in httpx already handles them and never has to learn this package
-// exists. The client sees one 401 with one message; which of the three it was goes
-// to the log, where it is a signal and not a hint for whoever sent it.
-var (
-	ErrMalformed    = fmt.Errorf("%w: malformed token", domain.ErrUnauthenticated)
-	ErrBadSignature = fmt.Errorf("%w: bad signature", domain.ErrUnauthenticated)
-	ErrExpired      = fmt.Errorf("%w: token expired", domain.ErrUnauthenticated)
-)
-
-type Claims struct {
-	Sub    int64  `json:"sub,string"`
-	Tenant int64  `json:"tid,string"`
-	Role   string `json:"role"`
-	Exp    int64  `json:"exp"`
-}
-
-type Verifier struct{ secret []byte }
-
-func NewVerifier(secret string) *Verifier { return &Verifier{secret: []byte(secret)} }
-
-// Verify checks the signature before it reads a single claim. Parse-then-verify is
-// how a forged token gets used anyway: by the time the signature fails, a log line,
-// a metric label or a cache key already carries the attacker's tenant id.
+// InternalServicesAuth fails CLOSED: an unset secret rejects every request rather than
+// admitting everyone, and the compare is constant-time so the secret does not leak one
+// byte at a time to anyone patient enough to time the 401s.
 //
-// now is a parameter, not a call to time.Now inside. Expiry is the one behaviour
-// here that a test must control, and a test that has to sleep for it is a test
-// somebody deletes.
-func (v *Verifier) Verify(token string, now time.Time) (Claims, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return Claims{}, ErrMalformed
+// The header only. Never a ?secret= query parameter: a secret in a URL is a secret in
+// every access log, proxy log and browser history it passes through.
+func InternalServicesAuth() gin.HandlerFunc {
+	expected := []byte(config.GlobalConfig.InternalServicesWebhookSecret)
+	return func(c *gin.Context) {
+		got := []byte(c.GetHeader("X-Internal-Secret"))
+		if len(expected) == 0 || subtle.ConstantTimeCompare(expected, got) != 1 {
+			c.AbortWithStatusJSON(helpers.RespondError("unauthorized", nil, http.StatusUnauthorized))
+			return
+		}
+		c.Next()
 	}
-
-	// The algorithm is pinned HERE, by us, before anything else happens. Trusting the
-	// token's own header is the alg-confusion family: the attacker sets alg to none
-	// and you accept an unsigned token, or downgrades RS256 to HS256 and signs with
-	// your public key, which you helpfully published.
-	var hdr struct {
-		Alg string `json:"alg"`
-	}
-	if err := decodeSegment(parts[0], &hdr); err != nil || hdr.Alg != "HS256" {
-		return Claims{}, ErrMalformed
-	}
-
-	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	want := mac.Sum(nil)
-
-	got, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return Claims{}, ErrMalformed
-	}
-	// hmac.Equal, not bytes.Equal and never ==. A compare that returns early on the
-	// first wrong byte leaks the signature one byte at a time to anyone patient
-	// enough to time your 401s.
-	if !hmac.Equal(got, want) {
-		return Claims{}, ErrBadSignature
-	}
-
-	var c Claims
-	if err := decodeSegment(parts[1], &c); err != nil {
-		return Claims{}, ErrMalformed
-	}
-	// Absent exp is invalid, not eternal. A token with no expiry is one leak away
-	// from permanent access with no revocation story.
-	if c.Exp == 0 || now.After(time.Unix(c.Exp, 0)) {
-		return Claims{}, ErrExpired
-	}
-	// A zero tenant scopes every query in this service to tenant 0, which matches
-	// nothing until the day a migration inserts a row with a zero default.
-	if c.Sub == 0 || c.Tenant == 0 {
-		return Claims{}, ErrMalformed
-	}
-	return c, nil
-}
-
-func decodeSegment(s string, dst any) error {
-	b, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, dst)
 }
 ```
+
+The rules, together:
+
+- **A user-facing DTO has no tenant field.** No `parent_user_id`, no
+  `owner_account_id`, no `user_id`, no `role`. The fix is not to remember to overwrite
+  the field from the token; it is that the field must not exist. A field the client can
+  send is a field one convenient line of code will eventually trust.
+- **A user-facing route has no tenant in the path.** `/v1/me/holidays`, not
+  `/v1/holidays/user/:user_id`. A path param on a user-facing route is the payload by
+  another name.
+- **A route that takes a tenant in the path is mounted under `InternalServicesAuth`.**
+  A tenant-in-path route on a public or JWT group lets any caller read any tenant by
+  editing a number in a URL.
+- **Another tenant's row is a 404, never a 403.** The service scopes the query by the
+  tenant, so an id that belongs to someone else matches nothing and the service returns
+  `ErrHolidayNotFound`. A 403 confirms the row exists, which is the fact you were
+  hiding.
+- **Anything the server owns is something the client may not assert.** Identity is the
+  most dangerous instance, not the only one: a price, a status, a balance, a
+  `created_at`. A `price` field on a create DTO is a client naming its own price.
+
+## Swagger is generated from the handlers
+
+Every handler carries a `godoc` block with `@Summary`, `@Tags`, `@Param` for every
+path, query and body input, `@Success` and `@Failure` naming typed envelope structs,
+`@Security`, and `@Router`. `swag init -g cmd/main.go` writes `docs/`, which is
+generated and never hand-edited; `routes/swagger.go` serves it.
+
+The envelope types for the docs live in `internal/swagger/` (`HolidayEnvelope`,
+`ErrorEnvelope`), so `@Success 200 {object} map[string]interface{}` never appears. A
+response documented as a map is a response a client generator cannot type, which puts
+the frontend back to reading JSON by hand.
 
 ## Checklist
 
 An endpoint is done when all of these are true. Any "no" is the bug you ship.
 
-- Its route is registered in its own feature folder's `Routes`, with a method.
-- It is mounted under the auth subtree, or it is a probe.
-- Its handler parses, validates, delegates, responds - and a valid request has
+- It is registered in its resource's `setup<Name>Routes`, under a group whose auth
+  matches its audience.
+- Its handler parses, validates, delegates and responds, and a valid request has
   exactly one path through it.
-- Its request type cannot express a tenant, a user id, or a role.
-- Its input to the service takes those three from `IdentityFrom`.
-- Every response, including the failures, went through `RespondOK`, `RespondPage` or
-  `RespondError`.
-- No `err.Error()` from a driver, a vendor or a decoder is anywhere in the body.
-- If it returns a list, it went through `ExecutePaginatedQuery` with a unique
-  tiebreak.
-- Its sort field came out of a `Sortable` whitelist.
-- Its new failure mode, if it has one, is a sentinel in `domain` and a case in
-  `statusFor`.
+- A binding failure goes through `BindingError`; a path id goes through `PathID`.
+- Every error reaches the wire through `RespondServiceError`. No `err.Error()` is in
+  any response body, and the handler chooses no status for an error.
+- Its new failure mode, if it has one, is a sentinel in `contracts/errors.go` with a
+  sentence written for the user.
+- Its request DTO cannot express a tenant, a user id or a role, unless the route is
+  internal.
+- Its response is a `ResponseDTO` built by a helper, never a model.
+- If it returns a list, it went through `ExecutePaginatedQuery` and `RespondPaginated`,
+  and no handler raised the limit.
+- It has a `godoc` block and `swag init` was re-run.
