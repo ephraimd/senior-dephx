@@ -103,6 +103,48 @@ esac
 if [ "$no_rc" -eq 0 ]; then pass "absent: hook exits 0"; else fail "absent: hook exited $no_rc"; fi
 rm -rf "$sp_yes" "$sp_no"
 
+echo "== a cached install searches only its own tool's cache =="
+# The override above bypasses the path-derived search, so these run the REAL hook from
+# a fake install path with no override, the way Claude Code and Codex launch it. The
+# hook reads core/ from its root, so the fake root gets a copy of core/. HOME points at a
+# separate dir holding a Claude-style install of the sibling: a hook launched from the
+# Codex cache must not count it.
+host_t="$(mktemp -d)"
+fake_root() {   # $1 = tool home; prints the fake plugin root
+  local r="$1/plugins/cache/senior-dephx/senior-dephx/9.9.9"
+  mkdir -p "$r"; cp -R "$ROOT/core" "$r/"; printf '%s' "$r"
+}
+run_cached() {  # $1 = fake plugin root; runs the real hook as a host would
+  ( cd "$host_t" && HOME="$host_t/home" CLAUDE_PLUGIN_ROOT="$1" bash "$ROOT/hooks/session-start.sh" 2>/dev/null )
+}
+mkdir -p "$host_t/home/.claude/plugins/cache/claude-plugins-official/superpowers"   # the OTHER tool has it
+
+# Codex install, own cache has the sibling: fragment.
+cx_yes="$host_t/codex-yes"; r="$(fake_root "$cx_yes")"
+mkdir -p "$cx_yes/plugins/cache/claude-plugins-official/superpowers/6.4.1"
+out="$(run_cached "$r")"
+case "$out" in *"$FRAGMENT"*) pass "codex cache with the sibling: fragment emitted" ;; *) fail "codex cache with the sibling: no fragment" ;; esac
+
+# Codex install, own cache lacks it; only Claude Code's cache and a leftover data/ dir
+# have it. Neither counts.
+cx_no="$host_t/codex-no"; r="$(fake_root "$cx_no")"
+mkdir -p "$cx_no/plugins/data/superpowers-claude-plugins-official"
+nc_rc=0; out="$(run_cached "$r")" || nc_rc=$?
+case "$out" in *"$FRAGMENT"*) fail "codex cache without the sibling: fragment emitted (read another tool's cache or a data/ dir)" ;; *) pass "codex cache without the sibling: no fragment, despite Claude Code's copy and a data/ leftover" ;; esac
+case "$out" in *"The Gate"*) pass "codex cache without the sibling: the gate is still emitted" ;; *) fail "codex cache without the sibling: no gate" ;; esac
+if [ "$nc_rc" -eq 0 ]; then pass "codex cache without the sibling: hook exits 0"; else fail "codex cache without the sibling: hook exited $nc_rc"; fi
+
+# A lookalike plugin name is not the sibling.
+mkdir -p "$cx_no/plugins/cache/some-market/superpowers-lookalike"
+out="$(run_cached "$r")"
+case "$out" in *"$FRAGMENT"*) fail "a superpowers-* lookalike counted as the sibling" ;; *) pass "a superpowers-* lookalike is not the sibling" ;; esac
+
+# Claude Code install: the same rule, its own cache.
+cc="$host_t/home/.claude"; r="$(fake_root "$cc")"
+out="$(run_cached "$r")"
+case "$out" in *"$FRAGMENT"*) pass "claude cache with the sibling: fragment emitted" ;; *) fail "claude cache with the sibling: no fragment" ;; esac
+rm -rf "$host_t"
+
 echo "== nouns: the core names no framework/vendor (the design rule, executable) =="
 # Two tiers, because one grep cannot serve both halves of this list.
 # TIER1 has no ordinary-English meaning, so a case-insensitive word-boundary match is safe.
