@@ -55,12 +55,18 @@ This plugin makes it the default instead.
 "plugin": ["senior-dephx@git+https://github.com/ephraimd/senior-dephx.git"]
 ```
 
-**Codex**
+**Codex** takes two steps: the plugin brings the skills, and `AGENTS.md` brings the gate
+(Codex plugins cannot run hooks, so the plugin alone never loads it):
 
 ```sh
-git clone https://github.com/ephraimd/senior-dephx.git
-cd senior-dephx && ./install.sh --codex     # writes ~/.codex/AGENTS.md
+codex plugin marketplace add ephraimd/senior-dephx
+codex plugin add senior-dephx@senior-dephx
+git clone https://github.com/ephraimd/senior-dephx.git ~/senior-dephx
+~/senior-dephx/install.sh --codex     # writes the gate into ~/.codex/AGENTS.md
 ```
+
+Clone somewhere you will keep: the `AGENTS.md` block points at that clone's skill files by
+absolute path.
 
 That's it. No config, no per-project setup.
 
@@ -237,9 +243,18 @@ installed" sentence. Either way, you're never pointed at a skill that isn't ther
 
 ## A note on Codex
 
-Codex has **no plugin or skill system**. `AGENTS.md` is the entire extension surface — no
-`/skill`, no loading-by-description. So Codex gets the gate always-on plus pointers to the
-full skills, which is less than Claude Code and OpenCode get.
+Codex installs this repo as a plugin, straight from the same marketplace Claude Code uses,
+and gets the skills from it. What a Codex plugin **cannot** do is run hooks, so the
+SessionStart hook that injects the gate in Claude Code never fires there.
+`install.sh --codex` closes that gap: it writes the gate into `~/.codex/AGENTS.md`, always
+on, plus a pointer to each skill's file as a fallback for a Codex without the plugin.
+
+To update, refresh both halves:
+
+```sh
+codex plugin marketplace upgrade senior-dephx && codex plugin add senior-dephx@senior-dephx
+git -C ~/senior-dephx pull && ~/senior-dephx/install.sh --codex
+```
 
 The installer is idempotent and only rewrites its own delimited block, so the rest of your
 `AGENTS.md` survives.
@@ -273,11 +288,10 @@ rule, so what it must satisfy is narrow and non-negotiable. `test/smoke.sh` enfo
   `skills/*/`, so a tidier-looking `skills/stacks/<lang>/` is never found: the glob matches
   the `stacks` folder, not the blueprint inside it. The skill is loaded nowhere and advertised
   to Codex nowhere.
-- **Its description gates it inside the first 150 characters.** The Codex block renders every
-  description cut at exactly 150 chars (`${desc:0:150}…`), because `AGENTS.md` is Codex's
-  whole extension surface and it can't load by description. A gate clause after that point
-  isn't merely missed — Codex advertises the blueprint with its gate sliced off, which is
-  worse than not shipping it.
+- **Its description gates it inside the first 150 characters.** The Codex `AGENTS.md` block
+  renders every description cut at exactly 150 chars (`${desc:0:150}…`), and that block is
+  always loaded, plugin or not. A gate clause after that point isn't merely missed: Codex
+  advertises the blueprint with its gate sliced off, which is worse than not shipping it.
 - **Its description states the do-not-autoload rule** — not just when to use it, but that it
   must never load for general work in that language, for another language, or on the agent's
   own initiative.
