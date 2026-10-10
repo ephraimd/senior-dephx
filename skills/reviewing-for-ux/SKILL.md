@@ -31,6 +31,13 @@ palette or structure. `ui-craft` owns the detailed construction rules. This revi
 checks whether users experience them. A subagent's report is evidence to verify, not
 approval. Exceptions need explicit human approval recorded with scope and reason.
 
+Also inspect enforcement: do root instructions discover those sources, do delegated
+agents read them, and do meaningful regression tests and a required evidence gate cover
+all changed UI before publication? Use existing coverage. Missing or disconnected
+coverage is a concrete finding; read-only review does not authorize setup writes.
+`ui-craft` routes authorized setup through its repository-guardrails reference. Verify
+reported gate failures/passes and CI wiring rather than accepting a setup checklist.
+
 ## 1. How does the user get here on day 30?
 
 **The entry point in the diff is how the builder reaches the surface; ask how a user

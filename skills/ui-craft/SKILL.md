@@ -39,6 +39,20 @@ Before applying anything below, spend two minutes learning the local truth:
 If any of these do not exist, that absence **is a finding** worth reporting - not a licence
 to invent a parallel one mid-feature.
 
+### Establish enforcement before implementation
+
+For authorized UI work, inspect the project's repository guardrails. Reuse complete
+coverage, extend partial coverage and establish missing checks in its existing rules,
+runtime and CI. Follow [repository-guardrails.md](references/repository-guardrails.md)
+before editing UI when enforcement is missing or incomplete. This setup is part of the
+implementation, not an optional follow-up. Preserve existing instructions and stronger
+policy. Read-only reviews report gaps; non-UI tasks do not create UI tooling. Startup
+hooks never perform repository writes. Subagents read current sources independently.
+
+Report **Guardrails: reused / extended / created**, canonical sources/version, local
+command, CI entry and trusted base, positive/negative evidence and remaining gaps.
+An unwired gate, invented evidence or a convenient narrow diff is incomplete setup.
+
 ## 1. No AI slop
 
 The #1 "made-by-AI" tell is the **decorative eyebrow pill**: a colored capsule → giant

@@ -15,3 +15,4 @@ jobs:
           python-version: '3.12'
       - run: bash test/smoke.sh
       - run: bash test/ui-policy.sh
+      - run: python3 test/repository-guardrails.py

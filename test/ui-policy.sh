@@ -17,6 +17,10 @@ assert 'retained' in ui, 'retained-result rule is absent'
 assert 'filtered' in ux, 'scoped-total review rule is absent'
 assert 'subagent' in gate, 'subagent handoff rule is absent'
 assert 'approval' in gate, 'exceptions lack an approval requirement'
+assert 'assess repository enforcement' in gate, 'startup policy does not require enforcement discovery'
+assert 'references/repository-guardrails.md' in ui, 'UI setup recipe is not discoverable'
+assert (r/'skills/ui-craft/references/repository-guardrails.md').is_file(), 'UI setup recipe is missing'
+assert (r/'skills/ui-craft/assets/check-ui-review.py').is_file(), 'Portable gate asset is missing'
 for p in [r/'core/GATE.md', r/'skills/ui-craft/SKILL.md', r/'skills/reviewing-for-ux/SKILL.md']:
     text=p.read_text()
     assert not re.search(r'(?:/Users/|/home/|https?://)', text), f'consumer path or host leaked into {p.name}'
