@@ -57,6 +57,32 @@ seed for initial bootstrap and fail-closed missing or unrelated history.
 Two repeated setup assessments reported existing coverage reused and produced the same
 repository digest; no second checker, workflow or instruction block was introduced.
 
+## Fresh installed discovery and reuse
+
+A normal-config ephemeral session discovered installed 0.8.0 without receiving skill or
+documentation paths. Its transcript independently read both installed UI/UX skills and
+the setup reference, then located the consuming repository's contract and voice sources.
+Its read-only feature proposal included the missing evidence gate and existing-CI wiring,
+preserved local terminology and viewports, and reported actual checks separately from
+unperformed browser verification.
+
+A second fresh installed session assessed the already-established disposable setup. It
+reused the checker, configuration and workflow, then found a concrete portability defect
+in the consuming fixture tests: an author-machine temporary path conflicted with Ubuntu
+CI. A missing-directory simulation produced 15 setup errors before the repair; afterward
+all 20 tests passed. Only that test helper and its evidence record changed. The session
+retained all assertions, refreshed source hashes and authorization scope, and reran the
+actual review gate. Two subsequent assessments produced identical repository digests.
+This exercised repairing partial coverage rather than adding a duplicate gate. Original
+UI, canonical contract, voice and copy check stayed unchanged.
+
+The recipe now explicitly requires checking generated tools against the consuming CI
+runtime/operating system and using platform temporary-directory APIs. This simulation
+is not a hosted Linux CI run. Unrelated installed plugin entries were unchanged.
+
+Plugin GitHub Actions still reported startup_failure before creating jobs, through API
+inspection only. Cloud verification remains unavailable despite passing local suites.
+
 ## Limits
 
 These exercises verify concrete discovery, proposals and setup artifacts in those runs.

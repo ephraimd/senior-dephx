@@ -101,7 +101,9 @@ bootstrap procedure for a new history; do not claim an empty diff proves enforce
 
 Test the real gate and actual CI wiring in a disposable checkout: an unreviewed UI change,
 rename/deletion, missing viewport, failing check and stale evidence must fail; a genuinely
-complete record must pass. Exercise existing checks after setup. Rerun setup: it must
+complete record must pass. Exercise existing checks after setup on the consuming CI runtime and operating system.
+Use platform temporary-directory APIs; never embed the author's machine paths in generated
+tooling or tests. Rerun setup: it must
 leave equivalent enforcement intact, without duplicate instructions, gates or workflows.
 A gate-record validator cannot prove CI ran it or tests exercised the real feature.
 
