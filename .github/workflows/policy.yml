@@ -1,9 +1,7 @@
 name: Plugin policy checks
-on:
-  pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:
+"on": [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   policy:
     runs-on: ubuntu-latest
