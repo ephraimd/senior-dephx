@@ -1,6 +1,6 @@
 ---
 name: ui-craft
-description: Use when building, reviewing, or redesigning any UI - components, landing/marketing sections, dashboard surfaces - or when something looks AI-generated/templated, feels visually inconsistent, wastes vertical space, or breaks on mobile. Covers de-slopping, primitive reuse, layout density, accent consistency, and the mobile-first verify bar.
+description: Use when building, reviewing or redesigning components, marketing pages, dashboards, dialogs or navigation, especially when UI feels inconsistent, abstract, cramped, silently unresponsive or difficult to use on a phone.
 ---
 
 # UI Craft
@@ -20,6 +20,11 @@ space before content.
 
 Before applying anything below, spend two minutes learning the local truth:
 
+- **What is the UI contract?** Find the repository instructions and canonical design,
+  UX, copy and accessibility standards. Read their current version and approved examples.
+  Name the sources and constraints applied. Existing screens can contain known defects;
+  an old implementation does not override the standard. If no contract exists, report it
+  and resolve necessary design decisions within the authorized scope.
 - **Where do primitives live?** Find the shared component directory and read its index.
   That list is your vocabulary.
 - **What is the canonical primary action?** Find the button every main CTA uses. There
@@ -77,10 +82,27 @@ the user came for - cards, the listing, the form - should appear within it.*
 - **Trim section padding.** Enormous hero padding is rarely earned; inner sections need
   far less than they are usually given.
 
+### Bounded worklists and a stable mental model
+
+Never put an independent section, form, control or status below a growing list. Keep
+scope, named sections and task controls before results. Pagination and row-owned
+feedback may follow their list. Separate peer datasets with the established tabs or
+labelled menu; use a short dialog for a focused task, a drawer for contextual detail and
+a page for substantial authoring. Long content alone does not justify hiding necessary
+work in a dialog. Bound result sets, preserve filters during paging and label result caps.
+
 ## 4. Mobile-first
 
 Assume mobile is the majority until the project's own numbers say otherwise.
 
+- **Size dialogs to their task and their container.** Internal columns depend on the
+  dialog's available width, not the browser's width. Check a narrow dialog on a wide
+  screen. Wrap complete shared URLs and pair copying with a manual fallback on refusal.
+  Keep a labelled close control, viewport-bounded scroll area and reachable footer
+  actions. Moving focus to the final field must scroll it into view; dismissal restores
+  focus to the trigger. Expandable form groups retain values when collapsed.
+- **Expose every section on a phone.** A hidden horizontal tab strip is not discoverable
+  navigation. Use a labelled selector or the project's accessible menu pattern when needed.
 - **Modals MUST scroll on mobile.** Centring a tall modal clips its top off-screen and the
   content becomes unreachable. Follow the project's modal pattern if it has one; if it
   doesn't, that is a finding.
@@ -112,6 +134,22 @@ that section's own CTA - but never introduce a second treatment of the primary s
   a user is charged, how long their money is held, or who can see their work, say so next
   to the control - dynamically, with their actual numbers in it.
 
+### Action outcomes and concrete language
+
+An action shows waiting, success or failure beside its control, with a useful next step.
+Distinguish confirmed disabled, unknown availability, unavailable service, forbidden,
+loading, successful empty and zero. A failed capability read must not become Off.
+Preserve input and retained results on failure; label older results. Do not retry paid
+operations automatically. An uncertain outcome needs status reconciliation and the
+existing financial safeguards before another paid attempt.
+
+Explain automation using its actual trigger, eligible records, destination, owner and
+next event. A blocked control names the conflicting owner or rule and offers the next
+permitted action. Show assignments by record and owner, with status and next task;
+"already handled" is insufficient. Approved wording is preserved verbatim until a human
+approves a change. Examples and benefit claims must match supported behavior, not imply
+unavailable automation, accuracy or freshness. Use respectful situation-based language.
+
 ## Red flags - stop and fix
 
 | You see… | Do this |
@@ -139,4 +177,13 @@ that section's own CTA - but never introduce a second treatment of the primary s
    slender, nothing a placeholder for a feature that doesn't exist. Actually look at the
    cards - don't just check "it renders".
 
-Proving it works end to end → `verify-for-real`.
+For changed behavior, exercise realistic empty and large lists, long names and URLs,
+waiting, failure, permission, unavailable and retained-data states. Inspect the smallest
+supported phone, a short viewport, tablet and desktop; test keyboard navigation,
+focus, scrolling, persistent navigation collisions and scope-preserving paging.
+Use the project's regression suite and record observed evidence separately from source
+inference and untested cases. A fixture proves only the components and paths it exercises.
+Do not rewrite baselines or weaken checks to hide a regression. Reload canonical sources
+after compaction and give subagents the same contract and acceptance scenarios.
+
+Proving it works end to end: `verify-for-real`.

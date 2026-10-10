@@ -64,6 +64,21 @@ path that changed, and read the output. An unverified claim is slop.
 
 State plainly what you did NOT do and what remains unproven.
 
+## UI contract
+
+Before planning, changing or reviewing UI, load `ui-craft` and `reviewing-for-ux`.
+Find and read the current project's canonical UI standards, approved copy and shared
+patterns. Name the sources and constraints you will apply. If none exist, report that
+finding and establish the required direction within the human's authorized scope.
+Project brand, terminology, tokens and acceptance criteria stay in that project.
+
+After compaction or a checkout change, reload the current sources. A UI subagent handoff
+carries their paths, version, relevant constraints and acceptance scenarios. Each
+subagent reads them independently and returns applied rules, observed evidence and
+limitations; the parent verifies the combined result. Deadline pressure or green tests
+never authorize weakening a standard, changing approved copy or replacing a baseline.
+Exceptions need explicit human approval and a recorded scope, reason and verification.
+
 ## Red flags - stop and re-brief
 
 | You catch yourself... | It means |
