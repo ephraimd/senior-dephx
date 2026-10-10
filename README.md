@@ -336,3 +336,22 @@ metrics. Product copy, branding, tokens, paths and specific workflows stay in th
 Run `bash test/smoke.sh` and `bash test/ui-policy.sh` before releasing. Static checks prove
 policy wiring, not model compliance. `test/ui-pressure-scenarios.md` defines independent
 agent exercises for that behavior and their evidence requirements.
+
+
+## Adaptive repository guardrails
+
+Version 0.8.0 makes local guardrails setup part of authorized UI implementation. The agent
+first reads the consuming project's rules, commands and CI, then reuses complete coverage,
+extends partial coverage or establishes missing enforcement. It preserves existing
+instructions, stricter standards, project vocabulary and delivery permissions.
+
+The setup recipe lives with `ui-craft`, alongside a portable, project-owned evidence gate
+example for repositories without an equivalent checker. Installed plugin paths do not
+become repository dependencies. Read-only reviews report gaps, non-UI tasks skip setup,
+and startup hooks never edit repositories. Setup is idempotent and its completion report
+names the real local command, CI entry, trusted base and positive/negative evidence.
+
+Run `python3 test/repository-guardrails.py` as well as the existing policy and smoke tests.
+The gate validates records and file integrity; behavior tests and human review establish
+whether the UI and the recorded observations are correct. Remote branch protection is a
+separate host setting, never an automatic side effect of local setup.

@@ -72,6 +72,13 @@ patterns. Name the sources and constraints you will apply. If none exist, report
 finding and establish the required direction within the human's authorized scope.
 Project brand, terminology, tokens and acceptance criteria stay in that project.
 
+For authorized UI implementation, assess repository enforcement before editing. Reuse
+or extend existing guardrails; establish missing local instructions, review evidence,
+regressions and CI gates using the consuming project's rules and tooling. `ui-craft`
+routes the setup procedure. This is part of UI work, not a separate manual setup task.
+Read-only reviews report gaps without writes; non-UI tasks do not bootstrap UI tooling.
+The startup hook injects this policy and does not modify repositories.
+
 After compaction or a checkout change, reload the current sources. A UI subagent handoff
 carries their paths, version, relevant constraints and acceptance scenarios. Each
 subagent reads them independently and returns applied rules, observed evidence and
