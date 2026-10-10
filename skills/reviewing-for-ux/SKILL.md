@@ -22,6 +22,15 @@ the product's job is that they never have to be told. "QA clicked through every 
 proves the flows work for people who already know them - it cannot prove a stranger can
 find them, read them, or survive them.
 
+## 0. Establish the review contract
+
+Read the project's current canonical UI standards, approved copy and interaction
+patterns before judging a diff. Name the sources and relevant constraints. Apply the
+project's requirements; do not import another product's brand, domain vocabulary,
+palette or structure. `ui-craft` owns the detailed construction rules. This review
+checks whether users experience them. A subagent's report is evidence to verify, not
+approval. Exceptions need explicit human approval recorded with scope and reason.
+
 ## 1. How does the user get here on day 30?
 
 **The entry point in the diff is how the builder reaches the surface; ask how a user
@@ -98,6 +107,26 @@ uniform weight is a refusal to answer.
   plus emphasis: the one or two numbers that drive action get the weight, the rest
   support. If everything is promoted, nothing is.
 
+## 7. Follow the growing data and the failed action
+
+Grow the list: can the user still find every independent task without passing all rows?
+Check bounded results, persistent filters and visible sections. Shrink the container:
+can a narrow dialog on a wide browser stack its content, show full URLs and reach its
+last field and footer? On a phone, can users discover every section without guessing a
+hidden horizontal strip? Verify focus entry, keyboard movement and return on dismissal.
+
+Click each changed action through waiting, success, refusal and failure. Confirm that
+unknown capability is distinct from confirmed Off and permission denial, that input and
+retained answers survive failure, and that older results are labelled. Paid retries,
+consent and approval follow the project's safeguards. Automation explains its trigger,
+destination and next event; conflicts expose the owning rule and the permitted next
+step. Assignments show the record, owner and next task together.
+
+Check every metric's population, period, scope and freshness against its producer.
+Page subtotals, filtered totals and global totals must not masquerade as one another.
+Unknown data is not zero, activity is not unique users and accepted work is not completed
+work. Follow a changed filter into paging, export and scheduled output where applicable.
+
 ## Ranking UX findings
 
 **A user who cannot find the feature, or who deletes three campaigns' infrastructure from
@@ -126,3 +155,12 @@ with the correctness and scale findings, worst first.
 | A modal spawning a second modal | A pattern that works only in the builder's hands |
 | Equal visual weight on every element of a screen | The screen refuses to say what matters |
 | Every UX finding filed under "Product" at the end | The ranking was decided before the review |
+
+## Review output
+
+Return the verdict and user-impact findings first. For each finding identify the affected
+path, contract requirement, concrete scenario and recovery. Then report the canonical
+sources loaded, rendered workflows and viewports, keyboard/focus checks, observed state
+outcomes, regression checks and limitations. Separate what was exercised from what was
+inferred. Do not demote experience failures to optional polish, approve from compilation
+alone or claim a fixture proves an unexercised live workflow.

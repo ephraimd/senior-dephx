@@ -323,3 +323,16 @@ there is one `GATE.md`, consumed three ways.
 ## License
 
 MIT. Use it, fork it, sell what you build with it.
+
+## UI contract preservation
+
+UI work loads the existing `ui-craft` and `reviewing-for-ux` skills and the consuming
+project's canonical standards before planning or review. The startup gate carries that
+requirement across supported adapters. Fresh sessions and subagents discover current
+sources, apply project requirements and report observed evidence. Reusable policy covers
+stable workspaces, growing lists, dialog containers, action states, ownership and scoped
+metrics. Product copy, branding, tokens, paths and specific workflows stay in the project.
+
+Run `bash test/smoke.sh` and `bash test/ui-policy.sh` before releasing. Static checks prove
+policy wiring, not model compliance. `test/ui-pressure-scenarios.md` defines independent
+agent exercises for that behavior and their evidence requirements.
