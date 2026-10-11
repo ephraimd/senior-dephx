@@ -61,7 +61,19 @@ export default function seniorDephxPi(pi) {
   // It preserves all existing instructions and writes no repository or settings files.
   pi.on('before_agent_start', async (event) => {
     if (event.systemPrompt.includes(marker)) return;
-    return { systemPrompt: `${event.systemPrompt}\n\n${marker}\n${gate}\n
+    return { systemPrompt: `${event.systemPrompt}\n\n${marker}\n
+Before reviewing, planning or changing UI, use \`read\` on both exact paths below.
+Read these files yourself; they are not preloaded by this gate. A parent's summary
+or a copy of the project rules does not replace loading these skills:
+- ${join(root, 'skills/ui-craft/SKILL.md')}
+- ${join(root, 'skills/reviewing-for-ux/SKILL.md')}
+
+Every UI subagent handoff includes these two skill paths as well as the consuming
+project's canonical paths, version, constraints and acceptance scenarios. Each child
+loads them independently and names the files it read in its return. This applies to
+read-only UI reviews and plans as well as implementation.
+
+${gate}\n
 ## Pi skill loading
 
 Use Pi's \`read\` tool to load the relevant \`SKILL.md\` from ${join(root, 'skills')}. Skills are discovered from this package in parent sessions. A child with a restricted skills catalog can read the same files directly; do not invent a \`Skill\` tool.

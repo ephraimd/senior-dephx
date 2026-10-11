@@ -32,6 +32,9 @@ test('Pi loads policy without repository writes, preserves other prompt content,
     assert.ok(first.systemPrompt.includes('repository-guardrails.md'));
     assert.ok(first.systemPrompt.includes('go-backend-blueprint'));
     assert.ok(first.systemPrompt.includes(join(fixture, 'skills')));
+    assert.ok(first.systemPrompt.includes(join(fixture, 'skills/ui-craft/SKILL.md')));
+    assert.ok(first.systemPrompt.includes(join(fixture, 'skills/reviewing-for-ux/SKILL.md')));
+    assert.ok(first.systemPrompt.indexOf('Read these files yourself') < first.systemPrompt.indexOf('# The Gate'));
     const second = await turn({ systemPrompt: first.systemPrompt }, ctx);
     assert.equal(second, undefined, 'Already injected policy must not grow on every turn');
     const afterCompact = await turn({ systemPrompt: 'Compacted base prompt.' }, ctx);
