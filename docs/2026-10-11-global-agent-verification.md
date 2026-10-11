@@ -1,6 +1,6 @@
 # Global runtime verification, 2026-10-11
 
-Release: 0.9.0. The canonical gate and skills remain shared across runtimes. Project
+Release: 0.9.1. The canonical gate and skills remain shared across runtimes. Project
 standards, vocabulary, tooling, test scenarios and evidence remain consumer-owned.
 
 ## Preserved Go rewrite
@@ -58,3 +58,28 @@ Existing model settings, telemetry choices, global operator notes and unrelated 
 are preserved. No claims are made about external CLI runners, intentionally disabled
 policy, unsupported older subagent APIs or conflicting host registrations. Those cases
 need their own runtime verification or produce an explicit registration warning.
+
+## Final installation and the child skill-loading correction
+
+Claude user scope and all three older project-scoped installations were upgraded, so
+those copies cannot shadow the global policy. The registered Pi package is updated from
+its normal Git source. Canonical gate, UI policy and all eight Go/backend files match the
+installed artifacts. Pi settings, global operator notes, Claude settings and unrelated
+Claude plugin metadata retain their recorded SHA256 fingerprints. The desktop bundle and
+signature remain unchanged and signature verification passes.
+
+The first globally installed Pi test passed project-rule adherence in fresh foreground
+and background children, but transcript inspection found neither opened the full UI/UX
+skills. This is a verification gap, not a full pass. Version 0.9.1 places exact on-demand
+UI skill paths before the gate and explicitly requires both paths in every UI handoff.
+Its regression assertions failed against 0.9.0 before the correction. A fresh controlled
+source-runtime rerun confirms the parent, foreground child and background child actually
+opened both skill files and the project sources independently. Both native child receipts
+record the required extension and exit code 0. A final installed-artifact probe checks
+discovery and registration separately from model behavior.
+
+GitHub hosted run 38111903853 for the release failed with startup_failure and zero jobs.
+Local checks and native source-runtime observations do not claim hosted CI success.
+Claude model and subagent behavior remain blocked by the weekly limit; fresh native
+startup-hook execution succeeds. Pi desktop extension loading remains blocked by its
+existing missing Jiti entry point, under the operator's instruction not to repair the app.

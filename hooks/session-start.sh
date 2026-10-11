@@ -19,7 +19,9 @@ SUPER="$ROOT/core/SUPERPOWERS.md"
 # SubagentStart requires JSON additionalContext; plain stdout is not child context.
 # Reuse the normal gate renderer. No Python/Node dependency is added to the hook.
 if [ "${1:-}" = "--subagent" ]; then
-  context="$(bash "$ROOT/hooks/session-start.sh")"
+  context="Before reviewing, planning or changing UI, read $ROOT/skills/ui-craft/SKILL.md and $ROOT/skills/reviewing-for-ux/SKILL.md yourself. They are not preloaded by this gate. A parent's summary or project-rule excerpts do not replace loading these skills. Each UI handoff includes both skill paths plus the project's canonical paths, version and acceptance scenarios. Return the files you actually read."
+  context+=$'\n\n'
+  context+="$(bash "$ROOT/hooks/session-start.sh")"
   context+=$'\n\n'
   context+="Full skills are in $ROOT/skills. Read the applicable SKILL.md files and the current project's canonical standards independently. Before UI work load ui-craft and reviewing-for-ux. Return applied rules, observed evidence and limitations; do not rely on the parent's recollection."
   context="${context//\\/\\\\}"

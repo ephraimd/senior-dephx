@@ -21,5 +21,7 @@ test('Claude injects the canonical gate directly into every native subagent', ()
   assert.equal(out.hookEventName, 'SubagentStart');
   assert.ok(out.additionalContext.includes(readFileSync(`${root}/core/GATE.md`, 'utf8')));
   assert.ok(out.additionalContext.includes(`${root}/skills`));
+  assert.ok(out.additionalContext.includes(`${root}/skills/ui-craft/SKILL.md`));
+  assert.ok(out.additionalContext.includes(`${root}/skills/reviewing-for-ux/SKILL.md`));
   assert.ok(out.additionalContext.includes('independently'));
 });
