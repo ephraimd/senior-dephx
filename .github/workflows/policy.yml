@@ -15,4 +15,6 @@ jobs:
           python-version: '3.12'
       - run: bash test/smoke.sh
       - run: bash test/ui-policy.sh
+      - run: node --test test/pi-adapter.mjs
+      - run: node --test test/claude-child.mjs
       - run: python3 test/repository-guardrails.py

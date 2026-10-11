@@ -16,6 +16,24 @@ SUPER="$ROOT/core/SUPERPOWERS.md"
 
 [ -f "$GATE" ] || exit 0
 
+# SubagentStart requires JSON additionalContext; plain stdout is not child context.
+# Reuse the normal gate renderer. No Python/Node dependency is added to the hook.
+if [ "${1:-}" = "--subagent" ]; then
+  context="$(bash "$ROOT/hooks/session-start.sh")"
+  context+=$'\n\n'
+  context+="Full skills are in $ROOT/skills. Read the applicable SKILL.md files and the current project's canonical standards independently. Before UI work load ui-craft and reviewing-for-ux. Return applied rules, observed evidence and limitations; do not rely on the parent's recollection."
+  context="${context//\\/\\\\}"
+  context="${context//\"/\\\"}"
+  # Encode every representable JSON control character, including tabs and newlines.
+  for code in {1..31}; do
+    printf -v character "\\$(printf '%03o' "$code")"
+    printf -v escaped '\\u%04x' "$code"
+    context="${context//$character/$escaped}"
+  done
+  printf '{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"%s"}}\n' "$context"
+  exit 0
+fi
+
 # The sibling plugin sits at an unpredictable depth: a marketplace cache nests it under
 # <marketplace>/superpowers/<version>/, a linked install sits one level down. So this
 # searches for the directory instead of testing a fixed path, and the search roots are
