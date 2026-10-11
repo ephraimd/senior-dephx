@@ -7,7 +7,34 @@ think first: research what already exists before adding another way to do it, na
 the change might break, ask you about the decisions that are actually yours, and refuse to
 say "done" until it has watched the thing run.
 
-Works in **Claude Code**, **OpenCode**, and **Codex**. MIT.
+Works in **Claude Code**, Claude's session hook loads the gate on startup, clear and compaction. Its native
+`SubagentStart` hook adds the same policy directly to each child, using the documented
+JSON `additionalContext` contract and the existing shell renderer. It does not create
+project files. See [Claude's hook reference](https://code.claude.com/docs/en/hooks#subagentstart).
+
+**Pi**, including Pi Agent Desktop's runtime:
+
+```bash
+pi install git:github.com/ephraimd/senior-dephx
+# Later updates:
+pi update git:github.com/ephraimd/senior-dephx
+```
+
+The package manifest discovers the skills and the native Pi extension. The extension
+adds the same gate to each turn's system prompt, including after compaction. It only
+loads policy; startup never creates repository files. Restart existing sessions after an
+update. When `pi` is not on PATH, use the CLI supplied by your Pi distribution.
+
+For native `pi-subagents` children, the extension uses that package's public required
+child extensions API. This includes foreground children that do not inherit ambient
+extensions, background children, and restricted skills catalogs: the gate points to the
+same on-demand skill files. No agent models, role prompts, tools or capability ceilings
+are changed. A denied extension fails at the child runtime's existing boundary. External
+CLI runners need their own plugin installation. Older `pi-subagents` versions without
+that API or competing host registrations produce a warning and require an explicit
+policy handoff; automatic child loading is not claimed in those cases.
+
+**OpenCode**, **Codex**, and **Pi**. MIT.
 
 ---
 
@@ -308,7 +335,8 @@ core/SUPERPOWERS.md               the deference map, emitted only when superpowe
 skills/*/SKILL.md                 the doctrine
 skills/*-backend-blueprint/
   references/                     the concrete patterns, one file per layer, read on demand
-hooks/                            Claude Code SessionStart injection
+hooks/                            Claude Code and Codex SessionStart injection
+.pi/extensions/                   Pi turn policy and native child registration
 .opencode/plugins/                OpenCode: skills path + gate injection
 codex/                            why Codex is different
 install.sh                        wires all three
@@ -318,7 +346,7 @@ test/smoke.sh                     the design rules, executable: the blueprint ga
 ```
 
 Three copies of the same judgment would drift — the exact failure this exists to end. So
-there is one `GATE.md`, consumed three ways.
+there is one `GATE.md`, consumed by each runtime adapter.
 
 ## License
 

@@ -2,12 +2,13 @@
 #
 # senior-dephx installer.
 #
-# Wires the same doctrine into all three tools from one source. Each tool gets the shape
+# Wires the same doctrine into the supported tools from one source. Each tool gets the shape
 # it actually supports rather than a pretend-uniform one:
 #
 #   Claude Code  native plugin  (skills auto-load by description; hook injects the gate)
 #   OpenCode     native plugin  (registers skills dir; injects the gate)
 #   Codex        native plugin  (same as Claude Code); --codex writes AGENTS.md as a fallback
+#   Pi           native package (manifest discovers skills and the policy extension)
 #
 set -euo pipefail
 
@@ -97,14 +98,24 @@ install_claude() {
   say "    /plugin marketplace add $ROOT"
 }
 
+install_pi() {
+  say 'install the native package globally, then restart existing Pi sessions:'
+  say '    pi install git:github.com/ephraimd/senior-dephx'
+  say 'update an existing installation:'
+  say '    pi update git:github.com/ephraimd/senior-dephx'
+  say 'If pi is not on PATH, use the CLI provided by your Pi distribution.'
+}
+
 case "${1:---all}" in
   --codex)    echo "Codex:";     install_codex "${2:-}" ;;
   --opencode) echo "OpenCode:";  install_opencode ;;
   --claude)   echo "Claude Code:"; install_claude ;;
+  --pi)       echo "Pi:"; install_pi ;;
   --all)
     echo "Codex:";       install_codex
     echo; echo "OpenCode:";  install_opencode
     echo; echo "Claude Code:"; install_claude
+    echo; echo "Pi:"; install_pi
     ;;
-  *) echo "usage: install.sh [--all|--codex [--here]|--opencode|--claude]" >&2; exit 1 ;;
+  *) echo "usage: install.sh [--all|--codex [--here]|--opencode|--claude|--pi]" >&2; exit 1 ;;
 esac
