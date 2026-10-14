@@ -1,6 +1,6 @@
 {
   "name": "senior-dephx",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, know where the code goes, ask on the real decisions, and verify before claiming done. Ships an opinionated Go backend blueprint that loads only when you ask for it by name",
   "type": "module",
   "main": ".opencode/plugins/senior-dephx.js",

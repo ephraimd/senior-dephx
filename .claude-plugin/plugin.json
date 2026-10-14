@@ -1,7 +1,7 @@
 {
   "name": "senior-dephx",
   "description": "Make your AI agent think like a senior engineer: research prior art before writing, name what a change breaks, know where the code goes, ask on the real decisions, and verify before claiming done. Ships an opinionated Go backend blueprint that loads only when you ask for it by name",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "author": {
     "name": "Ephraim D",
     "url": "https://github.com/ephraimd"
