@@ -134,6 +134,27 @@ Page subtotals, filtered totals and global totals must not masquerade as one ano
 Unknown data is not zero, activity is not unique users and accepted work is not completed
 work. Follow a changed filter into paging, export and scheduled output where applicable.
 
+## Review the work under interruption
+
+Check dirty input during refetch, edits made while Save is pending and changing resource
+or account before an old response arrives. Confirmation belongs to the submitted
+snapshot, not everything currently visible. Cold failures must not expose blank editable
+records; retained failures keep drafts/results visible. Unknown availability differs
+from Off; zero differs from missing fees. Check actual consent/payment/status contracts.
+
+In native apps inspect keyboard-open short screens, large text, safe areas, Android back,
+screen-reader focus, last-row menus and returning from details. Matched action sizes and
+compact statuses must preserve touch targets. Required tasks remain reachable with many
+records; substantial authoring is not buried in a short dialog. A contextual shortcut
+does not replace a findable home or clear default-field/scope explanation.
+
+For camera/server-confirmed work, trace repeated callbacks, permissions, backgrounding
+and timeouts after commit. Feedback is not admission; no cached/optimistic success or
+blind replay when confirmation is required. Performance findings need release-build
+measurements on physical devices, not a development simulator or vendor benchmark.
+Report missing evidence and approved exceptions plainly; green logic tests do not fill
+the gap. Keep private account data scoped and out of another account's restored view.
+
 ## Ranking UX findings
 
 **A user who cannot find the feature, or who deletes three campaigns' infrastructure from

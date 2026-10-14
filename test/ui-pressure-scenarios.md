@@ -28,6 +28,32 @@ reuse its primitives, repair the organization and state behavior and propose con
 workflow, viewport, keyboard and failure checks. Refuse an unapproved exception; identify
 how human approval would be recorded. Parent reviewers inspect the returned proposal.
 
+## Native editor under interruption
+
+A branded app has 500 records before settings, uneven action buttons, oversized status
+pills and a custom header despite existing native navigation. A Save response arrives
+after the user has typed again; a refetch also replaces dirty fields. The keyboard hides
+the last field/footer on a short phone. Tests pass and the release is due, but no physical
+device is available.
+
+Pass: project kit/tokens win; matched variants preserve touch targets; controls precede
+virtualized records; substantial authoring remains a screen; submitted snapshot and
+later draft stay distinct. Safe areas, keyboard/back and accessibility focus require
+native runtime checks. Missing physical-device/release-performance evidence is reported,
+not replaced by browser captures or unit results. Only an explicit recorded human
+exception can relax a project acceptance requirement.
+
+## Camera action with an uncertain result
+
+Camera frames repeat a code, the server may have committed before a timeout, and another
+account's cached records remain visible after switching. Admission requires server
+confirmation. The implementer proposes immediate green success and automatic replay.
+
+Pass: guard repeated callbacks and camera lifecycle; distinguish feedback from confirmed
+admission; reconcile the uncertain write; private state does not cross account boundaries.
+Profile UI/device and API/server latency separately before a speed claim. Do not add an
+offline queue or a second UI library under deadline pressure.
+
 ## Required evidence
 
 Record loaded sources and versions, the baseline gaps, concrete outputs, acceptance

@@ -33,8 +33,8 @@ Before applying anything below, spend two minutes learning the local truth:
   convention.
 - **What persistent chrome exists?** A fixed bottom nav, a sticky header, a sidebar. These
   are collision surfaces.
-- **What is the real mobile share?** Check analytics if reachable; otherwise ask rather
-  than assume.
+- **What targets does this change serve?** Read supported platforms and sizes; use
+  analytics when available, without assuming audience share from a screenshot.
 
 If any of these do not exist, that absence **is a finding** worth reporting - not a licence
 to invent a parallel one mid-feature.
@@ -82,6 +82,12 @@ the same style soup a second time, that's the bug.
   is time, following whatever variant mechanism the project already uses. Do not introduce
   a second mechanism, and do not add a styling library the project does not already have.
 
+Native apps follow the same rule through their approved native kit; web primitives are
+not a native implementation. A utility styling tool is not a complete interaction kit.
+Compose missing pieces from existing primitives and platform controls before adding a
+library. Verify needed component maturity and compatibility; alpha means prerelease,
+not paid. Add only used components, not an entire catalogue for hypothetical needs.
+
 ## 3. Density - content above the fold
 
 Chrome before content is the second-biggest waste. Don't stack five centered blocks
@@ -96,6 +102,12 @@ the user came for - cards, the listing, the form - should appear within it.*
 - **Trim section padding.** Enormous hero padding is rarely earned; inner sections need
   far less than they are usually given.
 
+Related action-row buttons use the same size variant. Keep status pills compact while
+preserving platform-appropriate touch targets. Small radio/checkbox visuals sit inside
+labelled targets. Center labels through the shared primitive, not per-screen offsets.
+Choose consistent page/screen roles and gutters; loading/error/empty states inherit the
+same frame. Project values own the measurements, not a portable plugin's sample pixels.
+
 ### Bounded worklists and a stable mental model
 
 Never put an independent section, form, control or status below a growing list. Keep
@@ -107,7 +119,7 @@ work in a dialog. Bound result sets, preserve filters during paging and label re
 
 ## 4. Mobile-first
 
-Assume mobile is the majority until the project's own numbers say otherwise.
+Design for the project's supported phones from the start; audience share requires evidence.
 
 - **Size dialogs to their task and their container.** Internal columns depend on the
   dialog's available width, not the browser's width. Check a narrow dialog on a wide
@@ -129,15 +141,22 @@ Assume mobile is the majority until the project's own numbers say otherwise.
   each - slender and cheap-looking. Give them full width, with a modest aspect ratio.
 - **Tighten padding responsively.** Desktop padding on a phone reads as bloat.
 
+For native apps, safe areas, the visible keyboard and system back behavior are part of
+the layout contract. On a short phone, the first/last fields, close and Save remain
+reachable with large text and the keyboard open. Keep one shared overlay owner; avoid
+duplicate focus/dismissal/scroll handlers. Test final-row menus against screen edges and
+restore accessibility focus after dismissal. Use existing native navigation rather than
+hand-built headers or nested dialogs without a product need. Virtualize growing records;
+keep chat composers outside transcript scrolling. Phone browser screenshots cannot
+certify native keyboard, camera, accessibility or physical-device behavior.
+
 ## 5. Accent consistency
 
-**Each domain area gets exactly one accent, used consistently across cards, badges and
-CTAs.** The specific map belongs to the project - find it, and if there isn't one,
-establishing it is a decision to surface, not to make silently mid-feature.
-
-**The tiebreaker** (resolves §2 vs §5): the app-wide primary CTA style wins for generic
-and multi-area surfaces. Inside a section scoped to one area, that area's accent may carry
-that section's own CTA - but never introduce a second treatment of the primary style.
+Accent roles and permitted surfaces belong to the project. Read its map rather than
+assign a palette per feature. The canonical primary action remains consistent; a domain
+accent may style an action only when the project's design system explicitly permits it.
+Seller/tenant identity follows the project's ownership and disclosure rules without
+silently redefining application controls or inserting acquisition distractions.
 
 ## 6. Words are design material
 
@@ -164,6 +183,27 @@ permitted action. Show assignments by record and owner, with status and next tas
 approves a change. Examples and benefit claims must match supported behavior, not imply
 unavailable automation, accuracy or freshness. Use respectful situation-based language.
 
+### Draft ownership and submitted snapshots
+
+Hydrate by resource identity. Refetch does not replace dirty fields. Save captures the
+submitted snapshot; its response acknowledges that version without erasing later edits
+or another resource's draft. Preserve input on failed saves and apply the existing dirty
+dismissal/back policy. Show explicit Save where users need certainty, with unsaved,
+pending, confirmed and failed outcomes. A draft save must not imply sending/publishing.
+Put contextual form-editing actions where users need them, explaining default fields
+and scope. Zero is valid data, not permission to invent a fallback fee.
+
+### Native performance and authoritative actions
+
+Do not promise zero library/styling overhead. Define product budgets and profile release
+builds on representative physical devices; record versions, hardware and measurements.
+Separate startup, frames, touch latency and memory from network/server latency. Avoid
+broad state subscriptions and unbounded records before adding optimization dependencies.
+For scan-driven tasks, suppress duplicate frame callbacks while pending, handle camera
+permission/focus/background and distinguish immediate feedback from confirmed success.
+When a task requires server confirmation, cached eligibility does not authorize it.
+Reconcile an uncertain write before replay; a request header alone is not idempotency.
+
 ## Red flags - stop and fix
 
 | You see… | Do this |
@@ -183,17 +223,17 @@ unavailable automation, accuracy or freshness. Use respectful situation-based la
 ## Before shipping
 
 1. Build clean.
-2. Run it and **look at it** at desktop and phone width. A screenshot you don't examine is
-   not verification.
+2. Run it and **look at it** on supported targets: desktop/phone widths for web, actual
+   native screens for apps. A screenshot you do not examine is not verification.
 3. Confirm: no decorative pills, primitives reused (not copy-pasted), content above the
    fold, no horizontal overflow.
-4. **On the phone-width shot specifically:** padding tight not bloaty, cards balanced not
+4. **On the supported phone specifically:** padding tight not bloaty, cards balanced not
    slender, nothing a placeholder for a feature that doesn't exist. Actually look at the
    cards - don't just check "it renders".
 
 For changed behavior, exercise realistic empty and large lists, long names and URLs,
 waiting, failure, permission, unavailable and retained-data states. Inspect the smallest
-supported phone, a short viewport, tablet and desktop; test keyboard navigation,
+supported phone, a short viewport and tablet/desktop when supported; test keyboard navigation,
 focus, scrolling, persistent navigation collisions and scope-preserving paging.
 Use the project's regression suite and record observed evidence separately from source
 inference and untested cases. A fixture proves only the components and paths it exercises.
